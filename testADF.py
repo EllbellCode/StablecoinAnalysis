@@ -1,71 +1,86 @@
 """
-Shows Stationarity in the volume and returns data!
+ADF test on our metrics
 """
 
 
 import pandas as pd
 from statsmodels.tsa.stattools import adfuller
-import glob
-import os
+from pathlib import Path
+import numpy as np
 
-folder_path = 'Data/Verified'  
-csv_files = glob.glob(os.path.join(folder_path, '*.csv'))
 
-# Initialize empty DataFrames to store results
-returns_adf = pd.DataFrame(columns=["Coin", "ADF Statistic", "p-value", "Number of Lags"])
-volume_adf = pd.DataFrame(columns=["Coin", "ADF Statistic", "p-value", "Number of Lags"])
-vol_adf = pd.DataFrame(columns=["Coin", "ADF Statistic", "p-value", "Number of Lags"])
+"""
+Runs the ADF test on a given series and returns a dictionary of results.
+"""
+def run_adf_test(series, autolag='AIC'):
 
-for file in csv_files:
-    data = pd.read_csv(file)
+        series = series.dropna()
+        if series.empty:
+            return {
+                "ADF Statistic": np.nan,
+                "p-value": np.nan,
+                "Number of Lags": 0,
+                "Result": "Series is empty"
+            }
+            
+        result = adfuller(series, autolag=autolag)
+        
+        return {
+            "ADF Statistic": result[0],
+            "p-value": result[1],
+            "Number of Lags": result[2],
+            "Result": "Stationary" if result[1] < 0.05 else "Non-Stationary"
+        }
 
-    train = data[(data['Date'] >= '2020-01-01') & (data['Date'] <= '2023-12-31')]
+"""
+Main test
+"""
+data_dir = Path("Data/Verified")
+files = list(data_dir.glob("*.csv"))
 
-    # Drop NaNs and multiply returns by 1000 to reduce scale warnings
-    log_returns = train['Log Returns'].dropna() * 1000
-    volume = train['VolLogChange'].dropna()
-    volatility = train['RV'].dropna()
+stablecoins = ['DAI', 'USDC', 'USDT']
+cryptos = ['BNB', 'BTC', 'ETH', 'XRP']
+
+tests_to_run = (
     
+    [(coin, 'LogVolChange') for coin in stablecoins] +
+    [(coin, 'Delta_LogRV') for coin in stablecoins] +
+    
+    [(coin, 'Log Returns') for coin in cryptos] +
+    [(coin, 'Delta_LogRV') for coin in cryptos]
+)
 
-    returns_result = adfuller(log_returns)
-    volume_result = adfuller(volume)
-    volatiltiy_result = adfuller(volatility)
+coin_data = {}
+for file in files:
+    coin_name = file.stem.replace("Verif_", "")
+    if coin_name in stablecoins or coin_name in cryptos:
+        df = pd.read_csv(file, parse_dates=['Date'], index_col='Date').sort_index()
+        coin_data[coin_name] = df
 
-    basename = os.path.basename(file)
-    ticker = basename.replace('Verif_', '').replace('.csv', '')
+all_results = []
 
-    # Create small DataFrames for this iteration's results
-    returns_row = pd.DataFrame([{
-        "Coin": ticker,
-        "ADF Statistic": returns_result[0],
-        "p-value": returns_result[1],
-        "Number of Lags": returns_result[2]
-    }])
+print("Running ADF tests for the Four-Factor Analysis...")
+print("=" * 50)
 
-    volume_row = pd.DataFrame([{
-        "Coin": ticker,
-        "ADF Statistic": volume_result[0],
-        "p-value": volume_result[1],
-        "Number of Lags": volume_result[2]
-    }])
+for coin, var in tests_to_run:
+    if coin in coin_data and var in coin_data[coin].columns:
+        
+        print(f"Testing {coin} - {var}...")
+        series = coin_data[coin][var]
+        
+        test_result = run_adf_test(series, autolag='AIC')
+        
+        test_result['Coin'] = coin
+        test_result['Variable'] = var
+        all_results.append(test_result)
+        
+    else:
+        print(f"Skipping {coin} - {var} (Data not found)")
 
-    vol_row = pd.DataFrame([{
-        "Coin": ticker,
-        "ADF Statistic": volatiltiy_result[0],
-        "p-value": volatiltiy_result[1],
-        "Number of Lags": volatiltiy_result[2]
-    }])
+results_df = pd.DataFrame(all_results)
+results_df = results_df[['Coin', 'Variable', 'ADF Statistic', 'p-value', 'Number of Lags', 'Result']]
 
-    # Append current results to the overall DataFrames
-    returns_adf = pd.concat([returns_adf, returns_row], ignore_index=True)
-    volume_adf = pd.concat([volume_adf, volume_row], ignore_index=True)
-    vol_adf = pd.concat([vol_adf, vol_row], ignore_index=True)
+print("\n--- ADF Test Results ---")
+print(results_df.to_string())
 
-print('Returns:')
-print(returns_adf)
-
-print('Volume:')
-print(volume_adf)
-
-print("Volatility:")
-print(vol_adf)
+results_df.to_csv("adf_results.csv", index=False)

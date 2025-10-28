@@ -1,3 +1,9 @@
+"""
+Granger Causality
+
+USed to capture linear causalities
+"""
+
 import pandas as pd
 from pathlib import Path
 from statsmodels.tsa.stattools import grangercausalitytests

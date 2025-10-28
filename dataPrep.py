@@ -121,7 +121,7 @@ def volNorm(data_dir):
         df = pd.read_csv(file)
 
         df['VolChange'] = df['Volume'] / df['Volume'].shift(-1) - 1
-        df['VolLogChange'] = np.log(df['Volume'] / df['Volume'].shift(-1))
+        df['LogVolChange'] = np.log(df['Volume'] / df['Volume'].shift(-1))
 
         df = df.sort_values("Date", ascending=True)
         df.to_csv(file, index=False)
@@ -138,6 +138,7 @@ def addVolatility(data_dir):
         df['GarmanKlass'] = np.sqrt(0.5 * (np.log(df['High'] / df['Low']) ** 2) - (2 * np.log(2) - 1) * (np.log(df['Close'] / df['Open']) ** 2))
         df['RV'] = np.sqrt((df['Log Returns']**2).rolling(30).sum()) / np.sqrt(30)
         df['Log RV'] = np.log(df['RV'])
+        df['Delta_LogRV'] = df['Log RV'].diff()
 
         df = df.sort_values("Date", ascending=True)
         df.to_csv(file, index=False)

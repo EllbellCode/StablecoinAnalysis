@@ -1,0 +1,125 @@
+"""
+Fit GARCH Models using a single lag of a variable from all stablecoins
+"""
+
+import pandas as pd
+import numpy as np
+from arch import arch_model
+from pathlib import Path
+
+dir = Path("Data/Verified")
+error_dist = 'skewt'
+models = ['Garch', 'eGarch']
+variables = ['RV', 'LogVolChange']
+max_lags = 1
+cutoff_date = pd.Timestamp("2024-01-01")
+
+# Load multiple stablecoins
+stablecoins = ['Verif_USDT.csv', 'Verif_USDC.csv', 'Verif_DAI.csv']
+stablecoin_dfs = {}
+
+for sc_file in stablecoins:
+    df_sc = pd.read_csv(dir / sc_file, parse_dates=['Date']).set_index('Date').sort_index()
+    sc_name = sc_file.replace('Verif_', '').replace('.csv', '')
+    stablecoin_dfs[sc_name] = df_sc
+
+# Merge all stablecoins into one dataframe for each variable
+cryptos = ['Verif_BNB.csv', 'Verif_BTC.csv', 'Verif_ETH.csv', 'Verif_XRP.csv']
+cryptoPaths = [dir / f for f in cryptos]
+
+results = []
+
+for file in cryptoPaths:
+    df = pd.read_csv(file, parse_dates=['Date']).set_index('Date').sort_index()
+    
+    for var in variables:
+        # Collect each stablecoin’s chosen variable
+        stablecoin_dfs_var = []
+        for sc_name, sc_df in stablecoin_dfs.items():
+            if var in sc_df.columns:
+                df_var = sc_df[[var]].rename(columns={var: f'{sc_name}_{var}'})
+                stablecoin_dfs_var.append(df_var)
+        
+        if not stablecoin_dfs_var:
+            continue
+        
+        stablecoins_data = pd.concat(stablecoin_dfs_var, axis=1)
+        
+        for model in models:
+            # Join crypto with all stablecoins (for this var)
+            data = df.join(stablecoins_data, how='inner')
+            
+            # Create lagged variables
+            lag_cols = []
+            for sc in stablecoins_data.columns:
+                for lag in range(1, max_lags+1):
+                    col_name = f'{sc}_lag{lag}'
+                    data[col_name] = data[sc].shift(lag)
+                    lag_cols.append(col_name)
+            
+            data = data.dropna(subset=['Log Returns'] + lag_cols)
+            if data.empty:
+                continue
+            
+            train_data = data[data.index < cutoff_date]
+            test_data  = data[data.index >= cutoff_date]
+            
+            y = train_data['Log Returns']
+            X = train_data[lag_cols]
+            y_scaled = y * 10  # rescale
+            
+            # Baseline model
+            m0 = arch_model(y_scaled, vol=model, p=1, q=1, mean='Constant', dist=error_dist)
+            r0 = m0.fit(disp='off')
+            
+            results.append({
+                'Crypto': file.stem,
+                'Variable': var,
+                'Model': f'{model} Baseline',
+                'Omega': r0.params.get('omega', np.nan),
+                'Alpha[1]': r0.params.get('alpha[1]', np.nan),
+                'Beta[1]': r0.params.get('beta[1]', np.nan)
+            })
+            
+            # ARX model with all lags
+            m1 = arch_model(y_scaled, vol=model, p=1, q=1, mean='ARX', lags=1, x=X, dist=error_dist)
+            r1 = m1.fit(disp='off')
+            
+            # Identify significant lags
+            significant_lags = []
+            for col in lag_cols:
+                pval = r1.pvalues.get(col, np.nan)
+                if pval < 0.05:
+                    significant_lags.append(f'{col} (p={pval:.3g})')
+            
+            results.append({
+                'Crypto': file.stem,
+                'Variable': var,
+                'Model': f'{model} + AR(1) + All Stablecoin lags 1-{max_lags}',
+                'Omega': r1.params.get('omega', np.nan),
+                'Alpha[1]': r1.params.get('alpha[1]', np.nan),
+                'Beta[1]': r1.params.get('beta[1]', np.nan),
+                'Significant_lags': ', '.join(significant_lags) if significant_lags else 'None'
+            })
+
+# Final summary
+summary_table = pd.DataFrame(results)
+
+# Filter to only models with significant lags
+sig_lags_df = summary_table[
+    (summary_table['Model'].str.contains(r'AR\(1\) \+')) &
+    (summary_table['Significant_lags'] != 'None')
+]
+
+print("\n=== Significant Stablecoin Lags ===")
+print(sig_lags_df[['Crypto', 'Variable', 'Model', 'Significant_lags']].to_string(index=False))
+
+"""
+For Lag 1 eGARCH:
+- We see all stablecoin RVs are significant when predicting BTC
+- No volume
+
+For Lag 1 GARCH:
+- No significance
+
+"""

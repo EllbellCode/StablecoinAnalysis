@@ -1,18 +1,29 @@
+"""
+Test For Copula Granger Causality
+Used to capture non-linear causalities
+"""
+
+
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from itertools import product
 from scipy.special import betaln
 from sklearn.preprocessing import StandardScaler
+import json
 
-
+"""
+Data Setup and Prelims
+"""
 data_dir = Path("Data/Verified")
 files = list(data_dir.glob("*.csv"))
 
 volatility = "RV"
 source_coins = ["DAI", "USDC", "USDT"]
-source_vars  = [volatility, "VolLogChange"]
+#source_coins = ["USDT"]
+source_vars  = [volatility, "LogVolChange"]
 target_coins = ["BNB", "BTC", "ETH", "XRP"]
+#target_coins = ["BTC"]
 target_vars  = [volatility, "Log Returns"]
 n_boot = 200
 max_lag = 1
@@ -20,7 +31,7 @@ max_lag = 1
 coin_data = {}
 for file in files:
     coin_name = file.stem.replace("Verif_", "")
-    df = pd.read_csv(file).sort_values("Date").dropna(subset=["Log Returns", "VolLogChange", volatility])
+    df = pd.read_csv(file).sort_values("Date").dropna(subset=["Log Returns", "LogVolChange", volatility])
     train = df[(df['Date'] >= '2020-01-01') & (df['Date'] <= '2023-12-31')]
     coin_data[coin_name] = train
 
@@ -228,6 +239,7 @@ def bootstrapGC(x, y, lag=1, n_boot=200, m_bern=10, h=None, random_state=None):
         idx = rng.choice(T, size=1, replace=True, p=w)
         return x_lags[idx][0]  # returns (lag,)
 
+    #null distribution to store the n_boot GC statistics
     gc_null = np.empty(n_boot, dtype=float)
 
     for b in range(n_boot):
@@ -244,7 +256,7 @@ def bootstrapGC(x, y, lag=1, n_boot=200, m_bern=10, h=None, random_state=None):
         y_star = np.concatenate([y[:lag], y_next_star])  # initial lag + resampled next
         x_star = np.concatenate([x[:lag], x_lags_star[:, 0]])  # initial lag + first component of x_lags_star
 
-        # Step 4: Compute GC on bootstrap sample
+        # Step 4: Compute single GC value on bootstrap sample
         gc_null[b] = calcGC(
             x_star,
             y_star,
@@ -278,16 +290,32 @@ def runCGC(coin_data, source_coins, source_vars, target_coins, target_vars, max_
                 "target_var": var_y,
                 "lag": max_lag,
                 "Copula GC": gc,
-                "p-value": p_value
+                "p-value": p_value,
+                "null_dist": null_dist
             })
             print(f"GC={gc:.6f}, p-value={p_value:.4f}")
-    return pd.DataFrame(results)
+    return results
 
 
-results_df = runCGC(
+results = runCGC(
     coin_data, source_coins, source_vars, target_coins, target_vars,
     max_lag=max_lag, n_boot=n_boot, m_bern=10, bw=None, seed=123
 )
+
+results_df = pd.DataFrame([{k:v for k,v in r.items() if k != "null_dist"} for r in results])
 results_df.to_csv("grangerCopulaRes.csv", index=False)
+
 sig_results = results_df[results_df["p-value"] < 0.05]
 sig_results.to_csv("grangerCopulaSig.csv", index=False)
+
+null_df = pd.DataFrame([{
+    "source_coin": r["source_coin"],
+    "source_var": r["source_var"],
+    "target_coin": r["target_coin"],
+    "target_var": r["target_var"],
+    "lag": r["lag"],
+    "GC_test": r["Copula GC"],
+    "null_dist": json.dumps(r["null_dist"].tolist())  # store as JSON string
+} for r in results])
+
+null_df.to_csv("grangerCopulaNulls.csv", index=False)
