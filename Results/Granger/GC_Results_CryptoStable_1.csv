@@ -1,5 +1,0 @@
-Source,Target,Lag,GC,p-value
-Crypto_Returns,Stable_Volume,1,0.024972489151431715,0.0
-Crypto_Returns,Stable_Volatility,1,0.013848538737567136,0.0
-Crypto_Volatility,Stable_Volume,1,0.025542702213856277,0.0
-Crypto_Volatility,Stable_Volatility,1,0.021648631107994084,0.0

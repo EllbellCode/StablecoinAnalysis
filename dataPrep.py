@@ -127,17 +127,28 @@ def volNorm(data_dir):
         df.to_csv(file, index=False)
 
 def addVolatility(data_dir):
-
     data_dir = Path(data_dir)
 
     for file in data_dir.glob("*.csv"):
-
         df = pd.read_csv(file)
 
-        df['Parkinson'] = np.sqrt((1 / (4 * np.log(2))) * (np.log(df['High'] / df['Low']) ** 2))
-        df['GarmanKlass'] = np.sqrt(0.5 * (np.log(df['High'] / df['Low']) ** 2) - (2 * np.log(2) - 1) * (np.log(df['Close'] / df['Open']) ** 2))
+        # 1. Calculate Garman-Klass Volatility
+        # Note: We use clip(lower=0) inside sqrt to handle potential tiny floating point errors returning negative zeros
+        term1 = 0.5 * (np.log(df['High'] / df['Low']) ** 2)
+        term2 = (2 * np.log(2) - 1) * (np.log(df['Close'] / df['Open']) ** 2)
+        
+        df['GarmanKlass'] = np.sqrt((term1 - term2).clip(lower=0))
+
+        # 2. Safe Log Calculation
+        # Replace 0 with NaN (or a small epsilon like 1e-9) before logging to avoid -inf
+        df['LogGarmanKlass'] = np.log(df['GarmanKlass'].replace(0, np.nan))
+        df['Delta_LogGK'] = df['LogGarmanKlass'].diff()
+
+        # 3. Realized Volatility
         df['RV'] = np.sqrt((df['Log Returns']**2).rolling(30).sum()) / np.sqrt(30)
-        df['Log RV'] = np.log(df['RV'])
+        
+        # Safe Log for RV as well
+        df['Log RV'] = np.log(df['RV'].replace(0, np.nan))
         df['Delta_LogRV'] = df['Log RV'].diff()
 
         df = df.sort_values("Date", ascending=True)

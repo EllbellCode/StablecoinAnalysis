@@ -4,17 +4,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import json
 from pathlib import Path
-import re # Import regular expressions to parse filenames
+import re 
 
 # --- 1. Setup ---
-# Define the directory to search for input files (current directory)
-input_dir = Path("Results/Granger")
-
-# Define the output directory
+input_dir = Path("Results/GrangerCopula")
 output_dir = Path("Plots/Granger")
-output_dir.mkdir(parents=True, exist_ok=True) # Use parents=True to create nested dirs
+output_dir.mkdir(parents=True, exist_ok=True) 
 
-# Use glob to find all NULLS files
+# Find all NULLS files (including those with _Win)
 nulls_files = list(input_dir.glob("GC_Nulls_*.csv"))
 
 if not nulls_files:
@@ -25,7 +22,9 @@ else:
 # --- 2. Outer Loop (Iterate over files) ---
 for nulls_file_path in nulls_files:
     
-    # --- A. Find and Load Corresponding RESULTS file ---
+    # --- A. Find Corresponding RESULTS file ---
+    # This simple replace works for both standard and winsorized files
+    # e.g., GC_Nulls_StableCrypto_7_Win.csv -> GC_Results_StableCrypto_7_Win.csv
     results_file_name = nulls_file_path.name.replace('GC_Nulls_', 'GC_Results_')
     results_file_path = input_dir / results_file_name
     
@@ -34,130 +33,89 @@ for nulls_file_path in nulls_files:
         continue
         
     try:
-        # Load the results and set a (Source, Target) index for easy lookup
         results_df = pd.read_csv(results_file_path)
-        
-        # --- FIX: Strip whitespace from key columns ---
-        # This handles hidden spaces like " Crypto_Returns"
         results_df['Source'] = results_df['Source'].str.strip()
         results_df['Target'] = results_df['Target'].str.strip()
-        # --- END FIX ---
-        
         results_df.set_index(['Source', 'Target'], inplace=True)
     except Exception as e:
-        print(f"  CRITICAL ERROR: Failed to load or set index for results file {results_file_path.name}. Error: {e}. Skipping file.")
+        print(f"  CRITICAL ERROR: Failed to load results file {results_file_path.name}. Error: {e}. Skipping.")
         continue
 
     # --- B. Load the NULLS file ---
     try:
         nulls_df = pd.read_csv(nulls_file_path)
-        
-        # --- FIX: Strip whitespace from key columns ---
         nulls_df['Source'] = nulls_df['Source'].str.strip()
         nulls_df['Target'] = nulls_df['Target'].str.strip()
-        # --- END FIX ---
-        
     except Exception as e:
         print(f"  Error reading {nulls_file_path.name}: {e}. Skipping.")
         continue
 
-    # Try to get the lag from the filename
-    lag_match = re.search(r'_(\d+)\.csv$', nulls_file_path.name)
-    lag = lag_match.group(1) if lag_match else "Unknown"
+    # --- UPDATED REGEX for Lag and Winsorization ---
+    # Matches: _7.csv OR _7_Win.csv OR _7_win.csv
+    lag_match = re.search(r'_(\d+)(?:_([Ww]in))?\.csv$', nulls_file_path.name)
     
-    print(f"\n--- Processing {nulls_file_path.name} (Lag {lag}) ---")
+    if lag_match:
+        lag = lag_match.group(1)
+        is_winsorized = bool(lag_match.group(2)) # True if group 2 exists (Win/win)
+    else:
+        lag = "Unknown"
+        is_winsorized = False
     
-    # === NEW DEBUGGING STEP ===
-    # This will show you all the keys available in the results file
-    print(f"  Available keys in {results_file_path.name}:")
-    print(f"  {list(results_df.index)}")
-    # ==========================
+    win_status = "Winsorized" if is_winsorized else "Raw"
+    
+    print(f"\n--- Processing {nulls_file_path.name} (Lag {lag}, {win_status}) ---")
 
-
-    # --- 3. Inner Loop (Iterate over rows in the file) ---
+    # --- 3. Inner Loop ---
     for _, nulls_row in nulls_df.iterrows():
-        
-        # --- C. Data Extraction (Already stripped from DF) ---
         source_name = nulls_row.get('Source')
         target_name = nulls_row.get('Target')
-        null_dist_str = nulls_row.get('Nulls') # Use 'Nulls' column
+        null_dist_str = nulls_row.get('Nulls')
         
         if not all([source_name, target_name, null_dist_str]):
-            print(f"  Skipping row with missing data (Source, Target, or Nulls).")
             continue
-            
-        print(f"\n  Looking for key: ({source_name}, {target_name})") # Debug print
 
-        # --- D. Look up Stats from RESULTS file ---
+        # --- D. Look up Stats ---
         try:
             stats_row = results_df.loc[(source_name, target_name)]
-            
-            # === THE FIX: Look for 'GC' not 'GC_test' ===
-            gc_test_stat = stats_row.get('GC') 
-            # ============================================
-            
-            p_value = stats_row.get('p-value') # The 'p-value' column
-            
-            if gc_test_stat is None or p_value is None:
-                raise KeyError("'GC' or 'p-value' missing from results file.")
-                
+            gc_test_stat = stats_row.get('GC')
+            p_value = stats_row.get('p-value')
         except KeyError:
-            print(f"  ---> WARNING: No results found for this key. Plotting histogram only.")
-            gc_test_stat = None
-            p_value = None
-        except Exception as e:
-            print(f"  Error looking up stats: {e}. Plotting histogram only.")
+            print(f"  ---> WARNING: No results found for ({source_name}, {target_name}). Plotting hist only.")
             gc_test_stat = None
             p_value = None
 
-        # --- E. Load Null Distribution ---
+        # --- E. Parse Null Distribution ---
         try:
             null_dist = np.array(json.loads(null_dist_str))
             null_dist = null_dist[~np.isnan(null_dist)]
         except Exception as e:
-            print(f"  Could not parse null distribution for {source_name} -> {target_name}. Skipping. Error: {e}")
             continue
 
-        if null_dist.size == 0:
-            print(f"  No valid null distribution data for {source_name} -> {target_name}. Skipping.")
-            continue
+        if null_dist.size == 0: continue
         
         # --- F. Create Plot ---
         plt.figure(figsize=(12, 7))
-        sns.histplot(null_dist, bins=30, kde=True, color='skyblue', label='Null Distribution (Bootstrap)')
+        sns.histplot(null_dist, bins=30, kde=True, color='teal' if is_winsorized else 'skyblue', 
+                     label=f'Null Dist ({win_status})')
         
-        # --- G. Add Stats to Plot (if found) ---
+        # --- G. Add Stats ---
         if gc_test_stat is not None and p_value is not None:
+            plt.axvline(gc_test_stat, color='red', linestyle='--', linewidth=2, 
+                        label=f'Observed GC: {gc_test_stat:.4f}')
             
-            # Plot the observed test statistic
-            plt.axvline(
-                gc_test_stat, 
-                color='red', 
-                linestyle='--', 
-                linewidth=2, 
-                label=f'Observed GC Statistic ({gc_test_stat:.4f})'
-            )
-            
-            # Add a text box for the p-value
-            plt.text(
-                0.95, 0.95, 
-                f'p-value = {p_value:.4f}', 
-                transform=plt.gca().transAxes, 
-                fontsize=14,
-                verticalalignment='top', 
-                horizontalalignment='right',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.5)
-            )
+            stats_text = f'p-value = {p_value:.4f}\n({win_status})'
+            plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=12,
+                     verticalalignment='top', horizontalalignment='right',
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
         
-        # --- Titles and Labels ---
-        title = f'Copula GC Null Distribution: {source_name} -> {target_name} (Lag {lag})'
+        title = f'Copula GC Null Distribution: {source_name} -> {target_name}\n(Lag {lag} | {win_status})'
         plt.title(title, fontsize=16)
         plt.xlabel('Copula Granger Causality Statistic', fontsize=12)
         plt.ylabel('Frequency', fontsize=12)
         plt.legend()
         plt.grid(True, linestyle=':', alpha=0.6)
         
-        # --- Save Plot ---
+        # --- Save Plot with Suffix ---
         filename = f"Null_{source_name}_to_{target_name}_lag_{lag}.png"
         output_path = output_dir / filename 
         

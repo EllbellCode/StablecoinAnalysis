@@ -1,0 +1,13 @@
+Source,Target,Lag,p_value,Significance
+Stable_Pos,Crypto_Returns,5,0.0074242437592368996,***
+Stable_Neg,Crypto_Returns,5,0.0001270943070272746,***
+Stable_Volatility,Crypto_Returns,5,0.49651017874223957,
+Stable_Volume,Crypto_Returns,5,0.36018027293081606,
+Stable_Pos,Crypto_Volatility,5,0.7110973308843895,
+Stable_Neg,Crypto_Volatility,5,0.47192008103732264,
+Stable_Volatility,Crypto_Volatility,5,0.24378636388557826,
+Stable_Volume,Crypto_Volatility,5,0.9082543279239961,
+Stable_Pos,Crypto_Volume,5,0.7313433825520286,
+Stable_Neg,Crypto_Volume,5,0.7961954931376055,
+Stable_Volatility,Crypto_Volume,5,0.1169360810996152,
+Stable_Volume,Crypto_Volume,5,0.09166997792648522,*

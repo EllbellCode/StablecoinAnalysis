@@ -11,87 +11,133 @@ from tqdm import tqdm
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+import matplotlib.pyplot as plt
+from scipy import stats
 
 warnings.filterwarnings('ignore')
 
 # --- OOS Hyperparameter Tuning: Define Grid (Smaller Version) ---
 PARAM_GRID = {
-    'n_estimators': [50],                
-    'learning_rate': [0.05],             
-    'max_depth': [3],                      
-    'subsample': [0.7, 0.8],                  
-    'colsample_bytree': [0.7, 0.8],           
+    'n_estimators': [50, 100],                
+    'learning_rate': [0.05, 0.1],             
+    'max_depth': [3, 4, 5],                     
+    'subsample': [0.7, 0.8],                   
+    'colsample_bytree': [0.7, 0.8],               
     'reg_alpha': [0, 0.05],                   
     'reg_lambda': [0.5, 1.5]                  
 }
 
-# We will overwrite n_estimators, learning_rate etc. with the best found params
-
 # --- Constants / Settings ---
 DATA_DIR = Path("Data/Verified")
+OUTPUT_DIR = Path("Results/ML/XG")
+PLOT_DIR = Path("Plots/ML/Gain/XG")
 START_DATE = '2020-01-01'
 TRAIN_END_DATE = '2024-01-01'
 FULL_END_DATE = '2025-01-01'
-STATIONARY_VOL = "Delta_LogRV"
-
-# GARCH Settings for Filtering
-MAX_ARMA_ORDER = 1
-MAX_GARCH_ORDER = 1
+MAX_ARMA_ORDER = 1 
+MAX_GARCH_ORDER = 1 
 GARCH_DIST = 'skewt'
+GARCH_MODEL = 'EGARCH' 
+SPECIFIC_LAGS = [1, 7, 30]
+DAYS_NUMBER = 366 
+WIN_LIMITS = [0.01, 0.01]
+RANDOM_STATE = 123
+VOLATILITY = "Delta_LogGK"
 
-# --- ML SETTINGS ---
-N_LAGS = 10 # Number of past lags to use as features
-XGB_PARAMS = { # Basic XGBoost parameters (can be tuned further)
+# Define the single pair to test
+SOURCE_FACTOR = "Stable_Volume"
+TARGET_FACTOR = "Crypto_Volatility"
+
+XGB_PARAMS = { 
     'objective': 'reg:squarederror',
     'eval_metric': 'rmse',
-    'random_state': 123,
-    'n_jobs': -1 # Use all CPU cores
+    'random_state': RANDOM_STATE,
+    'n_jobs': -1 
 }
 
-# --- SHARPE RATIO SETTINGS ---
-TRADING_THRESHOLD_LONG = 0.6 # Go long if predicted shock > 0.6
-TRADING_THRESHOLD_SHORT = 0.4 # Go short if predicted shock < 0.4
-RISK_FREE_RATE = 0.0 # Assume risk-free rate is 0
+# ===================================================================
+# Statistical Tests (DM & PT)
+# ===================================================================
+
+def diebold_mariano_test(real, pred1, pred2, h=1):
+    """
+    Calculates the Diebold-Mariano test statistic for predictive accuracy.
+    Tests if the difference in MSE between model 1 and model 2 is significant.
+    Negative stat -> Model 1 is better (lower error).
+    Positive stat -> Model 2 is better.
+    """
+    e1 = np.array(real) - np.array(pred1)
+    e2 = np.array(real) - np.array(pred2)
+    
+    d = (e1**2) - (e2**2)  # Loss differential (MSE)
+    mean_d = np.mean(d)
+    T = len(d)
+    
+    # Autocovariance at lag 0
+    gamma0 = np.var(d)
+    
+    # For h=1, we typically assume no autocorrelation in d, 
+    # but strictly DM uses a long-run variance estimator.
+    # Simple DM implementation for h=1:
+    dm_stat = mean_d / np.sqrt(gamma0 / T)
+    p_value = 2 * (1 - stats.norm.cdf(abs(dm_stat))) # Two-tailed
+    
+    return dm_stat, p_value
+
+def pesaran_timmermann_test(real, pred):
+    """
+    Calculates the Pesaran-Timmermann (PT) test statistic for directional accuracy.
+    H0: Independence between actual and predicted signs.
+    """
+    real = np.array(real)
+    pred = np.array(pred)
+    
+    # Binary Direction: 1 if > 0, 0 otherwise (or based on changes)
+    # Since inputs might be returns/diffs:
+    y = (real > 0).astype(int)
+    y_hat = (pred > 0).astype(int)
+    
+    T = len(y)
+    P = np.mean(y == y_hat) # Observed accuracy (Proportion correctly predicted)
+    
+    py = np.mean(y)      # Proportion of actual positives
+    py_hat = np.mean(y_hat) # Proportion of predicted positives
+    
+    # Expected accuracy under independence (P_star)
+    P_star = py * py_hat + (1 - py) * (1 - py_hat)
+    
+    # Variance of P (Standard Error)
+    var_P = (P_star * (1 - P_star)) / T
+    
+    # Avoid division by zero
+    if var_P == 0:
+        return np.nan, np.nan
+        
+    pt_stat = (P - P_star) / np.sqrt(var_P)
+    p_value = 2 * (1 - stats.norm.cdf(abs(pt_stat))) # Two-tailed
+    
+    return pt_stat, p_value, P # Return Stat, p-val, and Accuracy %
 
 # ===================================================================
-# Helper Functions (GARCH, PCA, etc. - Mostly unchanged)
+# Helper Functions 
 # ===================================================================
 
 def get_oos_forecast_params(fitted_model, actual_value):
-    """
-    Calculates 1-step-ahead forecast parameters (mu, sigma, nu)
-    and the OOS uniform shock (U). Needed to get the actual shock U_c,t.
-    """
-    # 1. Get the 1-step-ahead forecast
+    """Calculates 1-step-ahead forecast parameters."""
     forecast = fitted_model.forecast(horizon=1, reindex=False)
     mean_forecast = forecast.mean.iloc[0, 0]
     var_forecast = forecast.variance.iloc[0, 0]
     scale_forecast = np.sqrt(var_forecast)
-
     try:
-        # 1. Calculate the standardized shock: z_t = (y_t - mu_t) / sigma_t
-        std_shock = (actual_value - mean_forecast) / scale_forecast # <-- DEFINITION ADDED HERE
-
+        std_shock = (actual_value - mean_forecast) / scale_forecast 
         dist = fitted_model.model.distribution 
         all_params = fitted_model.params
-
-        # Get the names of the distribution parameters (e.g., ['nu', 'lambda'])
         dist_param_names = dist.parameter_names()
-
-        # Extract *only* those parameters from the full model results
         dist_params = [all_params[name] for name in dist_param_names]
-
-        # 3. Apply the CDF of the fitted distribution to the standardized shock.
-        # Pass the correct, filtered list of parameters
         uniform_transform = dist.cdf(std_shock, parameters=dist_params)
-
-        # Get nu just for returning it (if it exists)
         nu = all_params.get('nu', np.inf)
-
         return mean_forecast, scale_forecast, nu, uniform_transform
-
     except Exception as e:
-        # Return NaNs on failure
         return np.nan, np.nan, np.nan, np.nan
 
 def select_best_arma(series, max_order=MAX_ARMA_ORDER):
@@ -112,7 +158,6 @@ def select_best_arma(series, max_order=MAX_ARMA_ORDER):
                 continue
     return best_order
 
-
 def fit_best_garch(series, p, q, mean_p, mean_q, dist=GARCH_DIST):
     """Fits the specified ARMA(mean_p, mean_q)-GARCH(p,q) model."""
     series = series.dropna()
@@ -124,143 +169,203 @@ def fit_best_garch(series, p, q, mean_p, mean_q, dist=GARCH_DIST):
         mean_model = 'AR'
         ar_lags = mean_p
     try:
-        # Using GARCH for stability
-        am = arch_model(series, vol='GARCH', p=p, q=q,
+        am = arch_model(series, vol=GARCH_MODEL, p=p, q=q,
                         mean=mean_model, lags=ar_lags,
                         dist=dist)
         res = am.fit(update_freq=0, disp='off', options={'maxiter': 200})
         return res
     except Exception as e:
+        # print(f"  GARCH fit warning: {e}")
         return None
 
-
-def get_standardized_residuals(model_result):
-    """Extracts standardized residuals from a fitted GARCH model."""
-    if model_result is None: return pd.Series(dtype=float)
-    return model_result.std_resid
-
-# *** NEW FUNCTION ***
 def get_conditional_volatility(model_result):
-    """Extracts conditional volatility (sigma^2) from a fitted GARCH model."""
     if model_result is None: return pd.Series(dtype=float)
     return model_result.conditional_volatility
 
-
 def transform_to_uniform(model_result):
-    """
-    Extracts standardized residuals from a fitted GARCH model
-    and transforms them to uniform [0,1] using the model's fitted distribution.
-    """
     if model_result is None: 
         return pd.Series(dtype=float)
-    
-    # Get standardized residuals (z_t)
     std_resid = model_result.std_resid.dropna()
     if std_resid.empty:
         return pd.Series(dtype=float)
-    
-    # Get the fitted distribution (e.g., 'skewt') and its parameters
     dist = model_result.model.distribution 
     all_params = model_result.params
-    
-    # Get the names of the distribution parameters (e.g., ['nu', 'lambda'])
     dist_param_names = dist.parameter_names()
-        
-    # Extract *only* those parameters from the full model results
     dist_params = [all_params[name] for name in dist_param_names]
-    
-    # Apply the CDF to the residuals
-    # Pass the correct, filtered list of parameters
     uniform_shocks = dist.cdf(std_resid, parameters=dist_params)
-    
-    # Return as a Series with the correct index
     return pd.Series(uniform_shocks, index=std_resid.index)
 
-# --- PCA function (Unchanged) ---
-def create_pca_factor(coins, var, data_dict, factor_name, train_end_date):
+def calculate_pca_for_window(coins, var, data_dict, factor_name, current_date):
+    """
+    Calculates PCA factor avoiding look-ahead bias.
+    Fits params on history (start to yesterday), applies to today.
+    """
+    current_date = pd.to_datetime(current_date)
+    yesterday = current_date - pd.Timedelta(days=1)
+    
+    # 1. Gather Raw Data
     df_list = [data_dict[coin][var] for coin in coins if coin in data_dict and var in data_dict[coin].columns]
     if not df_list: return pd.Series(dtype=float, name=factor_name)
-    data_matrix = pd.concat(df_list, axis=1, keys=coins, join='inner').dropna()
-    if data_matrix.empty: return pd.Series(dtype=float, name=factor_name)
-    train_matrix = data_matrix.loc[START_DATE:train_end_date]
-    test_matrix = data_matrix.loc[train_end_date:].iloc[1:]
-    if train_matrix.empty or test_matrix.empty: return pd.Series(dtype=float, name=factor_name)
-    scaler = StandardScaler(); train_scaled = scaler.fit_transform(train_matrix)
-    pca = PCA(n_components=1); train_factor_scaled = pca.fit_transform(train_scaled)
-    print(f"Created Factor '{factor_name}'. PCA Explained Variance: {pca.explained_variance_ratio_[0]:.2%}")
-    loadings_dict = {coin: loading for coin, loading in zip(train_matrix.columns, pca.components_[0])}
-    print(f"  Loadings: {loadings_dict}\n")
-    test_scaled = scaler.transform(test_matrix)
-    test_factor_scaled = pca.transform(test_scaled)
-    train_series = pd.Series(train_factor_scaled.ravel(), index=train_matrix.index, name=factor_name)
-    test_series = pd.Series(test_factor_scaled.ravel(), index=test_matrix.index, name=factor_name)
-    return pd.concat([train_series, test_series])
-
-# ===================================================================
-# *** MODIFIED Helper Function for ML Backtest ***
-# ===================================================================
-
-def create_lagged_features(u_target_series, u_vol_series, v_resid_series=None, v_vol_series=None, n_lags=N_LAGS):
-    """
-    Creates lagged features for ML model.
-    Target y_t is the current shock U_c,t (u_target_series).
-    Features X_t are lagged shocks and lagged volatilities.
     
-    Benchmark Model: Lags of u_target_series, Lags of u_vol_series
-    Challenger Model: Lags of u_target_series, Lags of u_vol_series,
-                      Lags of v_resid_series, Lags of v_vol_series
-                      
-    Returns feature DataFrame X and target Series y.
-    """
+    # Raw Data Matrix
+    raw_df = pd.concat(df_list, axis=1, keys=coins, join='inner').dropna()
+    
+    # 2. Strict Train/Test Split
+    # Train: Start -> Yesterday
+    # Test: Today (Current Date)
+    train_data = raw_df.loc[START_DATE:yesterday]
+    test_data = raw_df.loc[[current_date]] # Keep as DataFrame (1 row)
+    
+    if train_data.empty: return pd.Series(dtype=float, name=factor_name)
+
+    # 3. Winsorize (Manual calculation to avoid leakage)
+    # We find limits from TRAIN, apply to TRAIN and TEST
+    lower_limit = train_data.quantile(WIN_LIMITS[0])
+    upper_limit = train_data.quantile(1 - WIN_LIMITS[1])
+    
+    # Clip Train
+    train_data = train_data.clip(lower=lower_limit, upper=upper_limit, axis=1)
+    # Clip Test (using Train limits!)
+    test_data = test_data.clip(lower=lower_limit, upper=upper_limit, axis=1)
+
+    # 4. Standard Scaler
+    scaler = StandardScaler()
+    train_scaled = scaler.fit_transform(train_data) # FIT on Train
+    
+    if not test_data.empty:
+        test_scaled = scaler.transform(test_data)   # TRANSFORM Test
+    else:
+        test_scaled = np.empty((0, train_data.shape[1]))
+
+    # 5. PCA
+    pca = PCA(n_components=1)
+    train_factor = pca.fit_transform(train_scaled) # FIT on Train
+    
+    if not test_data.empty:
+        test_factor = pca.transform(test_scaled)   # TRANSFORM Test
+    else:
+        test_factor = np.array([])
+
+    # 6. Reconstruct Series
+    full_index = train_data.index.union(test_data.index)
+    full_values = np.concatenate([train_factor.ravel(), test_factor.ravel()])
+    
+    return pd.Series(full_values, index=full_index, name=factor_name)
+
+def generate_factors_window(data_dict, current_end_date):
+    """Generates all factors for the window ending at current_end_date."""
+    f = {}
+    f["Stable_Volume"] = calculate_pca_for_window(stablecoins, "LogVolChange", data_dict, "PC1_Stable_Volume", current_end_date)
+    f["Stable_Volatility"] = calculate_pca_for_window(stablecoins, VOLATILITY, data_dict, "PC1_Stable_Volatility", current_end_date)
+    f["Stable_Returns"] = calculate_pca_for_window(stablecoins, "Log Returns", data_dict, "PC1_Stable_Returns", current_end_date)
+    f["Crypto_Returns"] = calculate_pca_for_window(cryptos, "Log Returns", data_dict, "PC1_Crypto_Returns", current_end_date)
+    f["Crypto_Volatility"] = calculate_pca_for_window(cryptos, VOLATILITY, data_dict, "PC1_Crypto_Volatility", current_end_date)
+    f["Crypto_Volume"] = calculate_pca_for_window(cryptos, "LogVolChange", data_dict, "PC1_Crypto_Volume", current_end_date)
+    return f
+
+# ===================================================================
+# ML Feature Creation Functions
+# ===================================================================
+
+def create_garch_features(u_target_series, u_vol_series, specific_lags, v_resid_series=None, v_vol_series=None):
+    u_target_series = u_target_series.replace([np.inf, -np.inf], np.nan)
+    u_vol_series = u_vol_series.replace([np.inf, -np.inf], np.nan)
+    if v_resid_series is not None:
+        v_resid_series = v_resid_series.replace([np.inf, -np.inf], np.nan)
+    if v_vol_series is not None:
+        v_vol_series = v_vol_series.replace([np.inf, -np.inf], np.nan)
+
     df = pd.DataFrame({'u_target': u_target_series})
-    df['u_vol'] = u_vol_series # Add target's volatility
+    df['u_vol'] = u_vol_series
     
-    # --- FIX: Create columns in grouped order to match prediction logic ---
-    # Add lagged target shock features
-    for i in range(1, n_lags + 1):
+    for i in specific_lags:
         df[f'u_target_lag_{i}'] = df['u_target'].shift(i)
-    # Add lagged target volatility features
-    for i in range(1, n_lags + 1):
+    for i in specific_lags:
         df[f'u_vol_lag_{i}'] = df['u_vol'].shift(i)
         
-    # Add lagged source features if provided (for challenger model)
     if v_resid_series is not None and v_vol_series is not None:
         df['v_resid'] = v_resid_series
         df['v_vol'] = v_vol_series
-        # Add lagged source shock features
-        for i in range(1, n_lags + 1):
+        for i in specific_lags:
             df[f'v_resid_lag_{i}'] = df['v_resid'].shift(i)
-        # Add lagged source volatility features
-        for i in range(1, n_lags + 1):
+        for i in specific_lags:
             df[f'v_vol_lag_{i}'] = df['v_vol'].shift(i)
-        # Drop the current (non-lagged) source values
+            
+        df['v_resid_ma_7_lag_1'] = df['v_resid'].rolling(window=7).mean().shift(1)
+        df['v_resid_ma_30_lag_1'] = df['v_resid'].rolling(window=30).mean().shift(1)
+        df['v_vol_ma_7_lag_1'] = df['v_vol'].rolling(window=7).mean().shift(1)
+        df['v_vol_ma_30_lag_1'] = df['v_vol'].rolling(window=30).mean().shift(1)
+        
         df = df.drop(columns=['v_resid', 'v_vol']) 
-    # --- END FIX ---
 
-    # Drop the current (non-lagged) target volatility
     df = df.drop(columns='u_vol')
     
-    # Drop rows with NaNs created by lagging
-    df.dropna(inplace=True)
+    bench_cols = [col for col in df.columns if col.startswith('u_') and col != 'u_target']
     
-    # Separate features (X) and target (y)
-    y = df['u_target']
-    X = df.drop(columns='u_target')
+    df_bench = df[['u_target'] + bench_cols].dropna()
+    y_bench = df_bench['u_target']
+    X_bench = df_bench.drop(columns='u_target')
     
-    return X, y
+    if v_resid_series is not None:
+        df_chall_garch = df.dropna() 
+        y_chall_garch = df_chall_garch['u_target']
+        X_chall_garch = df_chall_garch.drop(columns='u_target')
+    else:
+        X_chall_garch, y_chall_garch = (None, None)
 
-def calculate_sharpe_ratio(returns, risk_free_rate=RISK_FREE_RATE):
-    """Calculates annualized Sharpe ratio."""
-    excess_returns = returns - risk_free_rate / 252 # Daily risk-free rate
-    mean_er = excess_returns.mean()
-    std_er = excess_returns.std()
-    if std_er == 0: return 0.0 # Avoid division by zero
-    sharpe = (mean_er / std_er) * np.sqrt(252) # Annualize
-    return sharpe
+    return X_bench, y_bench, X_chall_garch, y_chall_garch
+
+def create_vol_on_garch_features(y_vol_series, u_shock_series, v_shock_series, v_vol_series, specific_lags):
+    y_vol_series = y_vol_series.replace([np.inf, -np.inf], np.nan)
+    u_shock_series = u_shock_series.replace([np.inf, -np.inf], np.nan) 
+    if v_shock_series is not None:
+        v_shock_series = v_shock_series.replace([np.inf, -np.inf], np.nan)
+    if v_vol_series is not None:
+        v_vol_series = v_vol_series.replace([np.inf, -np.inf], np.nan)
+
+    df = pd.DataFrame({'target_vol': y_vol_series})
+    
+    df['u_shock'] = u_shock_series
+    df['v_shock'] = v_shock_series
+    df['v_vol'] = v_vol_series
+    
+    for i in specific_lags:
+        df[f'target_vol_lag_{i}'] = df['target_vol'].shift(i)
+    for i in specific_lags:
+        df[f'u_shock_lag_{i}'] = df['u_shock'].shift(i)
+        
+    if v_shock_series is not None and v_vol_series is not None:
+        for i in specific_lags:
+            df[f'v_shock_lag_{i}'] = df['v_shock'].shift(i)
+        for i in specific_lags:
+            df[f'v_vol_lag_{i}'] = df['v_vol'].shift(i)
+
+        df['v_shock_ma_7_lag_1'] = df['v_shock'].rolling(window=7).mean().shift(1)
+        df['v_shock_ma_30_lag_1'] = df['v_shock'].rolling(window=30).mean().shift(1)
+        df['v_vol_ma_7_lag_1'] = df['v_vol'].rolling(window=7).mean().shift(1)
+        df['v_vol_ma_30_lag_1'] = df['v_vol'].rolling(window=30).mean().shift(1)
+        
+    df = df.drop(columns=['u_shock', 'v_shock', 'v_vol'], errors='ignore')
+
+    bench_cols = [col for col in df.columns if col.startswith('target_vol_lag_') or col.startswith('u_shock_lag_')]
+    
+    df_bench_vol = df[['target_vol'] + bench_cols].dropna()
+    y_bench_vol = df_bench_vol['target_vol']
+    X_bench_vol = df_bench_vol.drop(columns='target_vol')
+    
+    df_chall_vol = df.dropna()
+    y_chall_vol = df_chall_vol['target_vol']
+    X_chall_vol = df_chall_vol.drop(columns='target_vol')
+
+    return X_bench_vol, y_bench_vol, X_chall_vol, y_chall_vol
+
 
 # ===================================================================
 # Main ML Backtest Logic
 # ===================================================================
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("Loading and preparing data...")
 coin_data = {}
@@ -274,319 +379,337 @@ for file in DATA_DIR.glob("*.csv"):
         df = df[(df['Date'] >= START_DATE) & (df['Date'] <= FULL_END_DATE)]
         coin_data[coin_name] = df.set_index('Date')
 
-print("Creating PCA Factors (Train/Test Split aware)...")
-factors = {}
-# --- Factors --- (Assumed correct creation)
-factors["Stable_Volume"] = create_pca_factor(stablecoins, "LogVolChange", coin_data, "PC1_Stable_Volume", TRAIN_END_DATE)
-factors["Stable_Volatility"] = create_pca_factor(stablecoins, STATIONARY_VOL, coin_data, "PC1_Stable_Volatility", TRAIN_END_DATE)
-factors["Crypto_Returns"] = create_pca_factor(cryptos, "Log Returns", coin_data, "PC1_Crypto_Returns", TRAIN_END_DATE)
-factors["Crypto_Volatility"] = create_pca_factor(cryptos, STATIONARY_VOL, coin_data, "PC1_Crypto_Volatility", TRAIN_END_DATE)
-
+# --- Initial Factors for Tuning ---
+# We compute factors up to TRAIN_END_DATE for the initial hyperparameter tuning
+print("Calculating Initial PCA Factors for Hyperparameter Tuning...")
+initial_factors = generate_factors_window(coin_data, TRAIN_END_DATE)
 
 print("-" * 50)
-print(f"Running Out-of-Sample Copula-ML Backtests (with Volatility Features)")
-print(f"Training up to {TRAIN_END_DATE}, Testing on {TRAIN_END_DATE} to {FULL_END_DATE}")
+print(f"Running Out-of-Sample ML Backtests (EXPANDING PCA)")
+print(f"Source: {SOURCE_FACTOR}, Target: {TARGET_FACTOR}, Lags: {SPECIFIC_LAGS}")
 print("-" * 50)
-
-tests_to_run = [
-    ("Stable_Volume", "Crypto_Returns"),
-    ("Stable_Volume", "Crypto_Volatility"),
-    ("Stable_Volatility", "Crypto_Returns"),
-    ("Stable_Volatility", "Crypto_Volatility"),
-]
 
 ml_results = []
+source_key = SOURCE_FACTOR
+target_key = TARGET_FACTOR
+specific_lags = SPECIFIC_LAGS
 
-for source_key, target_key in tests_to_run:
-    print(f"\n===== ML OOS TEST: {source_key} (lagged) -> {target_key} (t) =====")
+# Extract Initial Series
+y_series_init = initial_factors[target_key].dropna()
+x_series_init = initial_factors[source_key].dropna()
+common_idx_init = y_series_init.index.intersection(x_series_init.index)
+y_series_init = y_series_init.loc[common_idx_init]
+x_series_init = x_series_init.loc[common_idx_init]
 
-    # --- Get all factor data ---
-    y_series_all = factors[target_key].dropna()
-    x_series_all = factors[source_key].dropna()
-    common_idx = y_series_all.index.intersection(x_series_all.index)
-    y_series_all = y_series_all.loc[common_idx]
-    x_series_all = x_series_all.loc[common_idx]
+# Check Data Sufficiency
+if len(y_series_init) < 50:
+    print(f"  Skipping test: Not enough data.")
+    exit()
+
+print(f"  Finding initial ARMA orders for GARCH filtering...")
+fixed_arma_order_y = select_best_arma(y_series_init, max_order=MAX_ARMA_ORDER)
+fixed_arma_order_x = select_best_arma(x_series_init, max_order=MAX_ARMA_ORDER)
+
+# Initial GARCH Fit (already winsorized inside generate_factors_window)
+initial_target_garch_fit = fit_best_garch(y_series_init, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
+                                          mean_p=fixed_arma_order_y[0], mean_q=fixed_arma_order_y[1],
+                                          dist=GARCH_DIST)
+initial_source_garch_fit = fit_best_garch(x_series_init, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
+                                          mean_p=fixed_arma_order_x[0], mean_q=fixed_arma_order_x[1],
+                                          dist=GARCH_DIST)
+
+if initial_target_garch_fit is None or initial_source_garch_fit is None:
+    print("  Skipping test: Failed to fit initial GARCH models.")
+    exit()
+
+u_target_full = transform_to_uniform(initial_target_garch_fit).clip(1e-6, 1-1e-6)
+u_vol_full = get_conditional_volatility(initial_target_garch_fit)
+v_resid_full = transform_to_uniform(initial_source_garch_fit).clip(1e-6, 1-1e-6)
+v_vol_full = get_conditional_volatility(initial_source_garch_fit)
+
+# Feature Creation for Tuning
+X_train_initial_bench_g, y_train_initial_bench_g, X_train_initial_chall_g, y_train_initial_chall_g = create_garch_features(
+    u_target_series=u_target_full, u_vol_series=u_vol_full, specific_lags=specific_lags,   
+    v_resid_series=v_resid_full, v_vol_series=v_vol_full        
+)
+X_train_initial_bench_v, y_train_initial_bench_v, X_train_initial_chall_v, y_train_initial_chall_v = create_vol_on_garch_features(
+    y_vol_series=u_vol_full, u_shock_series=u_target_full, v_shock_series=v_resid_full, v_vol_series=v_vol_full, specific_lags=specific_lags
+)
+
+if X_train_initial_bench_g.empty or X_train_initial_chall_g.empty:
+    print("  Skipping tuning: Not enough initial data.")
+    exit()
+
+# Tune Hyperparameters
+tscv = TimeSeriesSplit(n_splits=5)
+
+print("  Tuning Benchmark GARCH Model...")
+grid_search_benchmark_garch = GridSearchCV(xgb.XGBRegressor(**XGB_PARAMS), PARAM_GRID, scoring='neg_mean_squared_error', cv=tscv, n_jobs=-1)
+grid_search_benchmark_garch.fit(X_train_initial_bench_g, y_train_initial_bench_g)
+best_params_benchmark_garch = {**XGB_PARAMS, **grid_search_benchmark_garch.best_params_}
+
+print("  Tuning Challenger GARCH Model...")
+grid_search_challenger_garch = GridSearchCV(xgb.XGBRegressor(**XGB_PARAMS), PARAM_GRID, scoring='neg_mean_squared_error', cv=tscv, n_jobs=-1)
+grid_search_challenger_garch.fit(X_train_initial_chall_g, y_train_initial_bench_g)
+best_params_challenger_garch = {**XGB_PARAMS, **grid_search_challenger_garch.best_params_}
+
+print("  Tuning Benchmark VOL Model...")
+grid_search_benchmark_vol = GridSearchCV(xgb.XGBRegressor(**XGB_PARAMS), PARAM_GRID, scoring='neg_mean_squared_error', cv=tscv, n_jobs=-1)
+grid_search_benchmark_vol.fit(X_train_initial_bench_v, y_train_initial_bench_v)
+best_params_benchmark_vol = {**XGB_PARAMS, **grid_search_benchmark_vol.best_params_}
+
+print("  Tuning Challenger VOL Model...")
+grid_search_challenger_vol = GridSearchCV(xgb.XGBRegressor(**XGB_PARAMS), PARAM_GRID, scoring='neg_mean_squared_error', cv=tscv, n_jobs=-1)
+grid_search_challenger_vol.fit(X_train_initial_chall_v, y_train_initial_bench_v)
+best_params_challenger_vol = {**XGB_PARAMS, **grid_search_challenger_vol.best_params_}
+
+
+# Feature Importance Plots
+try:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 10))
+    # Garch Plot
+    model_chall_garch = grid_search_challenger_garch.best_estimator_
+    imp_g = pd.DataFrame({'Feature': model_chall_garch.feature_names_in_, 'Importance': model_chall_garch.feature_importances_}).sort_values('Importance')
+    ax1.barh(imp_g['Feature'], imp_g['Importance'], color='skyblue')
+    ax1.set_title(f'Test 1: Challenger GARCH\n{SOURCE_FACTOR} -> {TARGET_FACTOR}')
+    # Vol Plot
+    model_chall_vol = grid_search_challenger_vol.best_estimator_
+    imp_v = pd.DataFrame({'Feature': model_chall_vol.feature_names_in_, 'Importance': model_chall_vol.feature_importances_}).sort_values('Importance')
+    ax2.barh(imp_v['Feature'], imp_v['Importance'], color='salmon')
+    ax2.set_title(f'Test 2: Challenger VOL\n{SOURCE_FACTOR} -> {TARGET_FACTOR}')
+    plt.tight_layout()
+    plt.savefig(PLOT_DIR / f"gain_{SOURCE_FACTOR}_to_{TARGET_FACTOR}.png")
+    plt.close(fig)
+except Exception: pass
+
+
+oos_predictions_garch = []
+oos_predictions_vol = []
+
+# Define Test Dates
+# We need the full available range to define 'test_dates', then iterate
+# We can use any coin to get the index range
+full_dates = coin_data[cryptos[0]].index
+test_dates = full_dates[(full_dates > TRAIN_END_DATE) & (full_dates <= FULL_END_DATE)]
+
+print(f"  Running EXPANDING PCA and Expanding Window Forecast for {len(test_dates)} points...")
+
+for current_date in tqdm(test_dates):
+    yesterday = current_date - pd.Timedelta(days=1)
     
-    # --- Determine initial training set and test dates ---
-    initial_train_y = y_series_all.loc[:TRAIN_END_DATE]
-    initial_train_x = x_series_all.loc[:TRAIN_END_DATE]
-    test_dates = y_series_all.loc[TRAIN_END_DATE:].iloc[1:].index
+    # --- CRITICAL: RE-RUN PCA ON EXPANDING WINDOW ---
+    # We calculate factors using data strictly up to 'yesterday' to predict 'current_date'
+    # Note: To evaluate the prediction for 'current_date', we need the actual value for 'current_date'.
+    # But for TRAINING the model, we only use data up to 'yesterday'.
+    # The 'factors' dict will contain series ending at 'yesterday'.
     
-
-    if len(initial_train_y) < (N_LAGS + 50) or len(test_dates) < 50:
-        print("  Skipping test: Not enough initial training or test data.")
-        continue
-
-    # --- Get fixed ARMA orders based *only* on initial training data ---
-    print(f"  Finding initial ARMA orders for GARCH filtering...")
-    fixed_arma_order_y = select_best_arma(initial_train_y, max_order=MAX_ARMA_ORDER)
-    fixed_arma_order_x = select_best_arma(initial_train_x, max_order=MAX_ARMA_ORDER)
-
-    # --- >>> MODIFIED: FIT INITIAL GARCH MODELS TO GET FULL HISTORY <<< ---
-    print("  Fitting initial GARCH models to get full residual & vol history for tuning...")
+    # However, to get the "Actual" value for the current date to store in results, 
+    # we technically need the factor value for today. 
+    # In a real trading scenario, we predict T+1 at T. At T+1, we observe Realized T+1.
+    # To get Realized T+1 factor, we need the PCA weights.
+    # Standard approach: Use PCA weights from T (yesterday) to project data at T+1 (today), 
+    # OR re-fit PCA including T+1 to see what the factor value *is*.
+    # Here, we will re-calc PCA including 'current_date' just to extract the "Actual" Y value,
+    # but we will slice the training data to 'yesterday' for the Model.
     
-    # Fit Y model on initial training data
-    initial_bench_fit = fit_best_garch(initial_train_y, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
-                                       mean_p=fixed_arma_order_y[0], mean_q=fixed_arma_order_y[1],
-                                       dist=GARCH_DIST)
-    # Fit X model on initial training data
-    initial_x_fit = fit_best_garch(initial_train_x, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
-                                   mean_p=fixed_arma_order_x[0], mean_q=fixed_arma_order_x[1],
-                                   dist=GARCH_DIST)
-
-    if initial_bench_fit is None or initial_x_fit is None:
-        print("  Skipping test: Failed to fit initial GARCH models.")
-        continue
-
-    # Extract and Transform full history of residuals
-    initial_x_resid = get_standardized_residuals(initial_x_fit)
+    current_factors_full = generate_factors_window(coin_data, current_date)
     
-    # *** NEW: Extract volatility history ***
-    initial_bench_vol = get_conditional_volatility(initial_bench_fit)
-    initial_x_vol = get_conditional_volatility(initial_x_fit)
+    y_series_now = current_factors_full[target_key].dropna()
+    x_series_now = current_factors_full[source_key].dropna()
+    
+    # 1. Define Training Data (Up to Yesterday)
+    train_y = y_series_now.loc[:yesterday]
+    train_x = x_series_now.loc[:yesterday]
+    
+    if current_date not in y_series_now.index: continue
+    actual_y_value = y_series_now.loc[current_date]
 
-    # --- DEFINE the variables for features/target ---
-    # Target (y) is the uniform shock of the target series
-    u_target_full = transform_to_uniform(initial_bench_fit)
-    v_resid_full = transform_to_uniform(initial_x_fit)
+    # 2. Re-fit GARCH on Expanding Window
+    # (Data is already winsorized in generate_factors_window)
+    model_y = fit_best_garch(train_y, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
+                             mean_p=fixed_arma_order_y[0], mean_q=fixed_arma_order_y[1], dist=GARCH_DIST)
+    model_x = fit_best_garch(train_x, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
+                             mean_p=fixed_arma_order_x[0], mean_q=fixed_arma_order_x[1], dist=GARCH_DIST)
     
-    u_target_full = u_target_full.clip(1e-6, 1-1e-6)
-    v_resid_full = v_resid_full.clip(1e-6, 1-1e-6)
-    
-    
-    # Feature 2: Conditional volatility of the target series
-    u_vol_full = pd.Series(initial_bench_vol, index=initial_bench_vol.index, name='u_vol')
-    
-    # Feature 3: Conditional volatility of the source series
-    v_vol_full = pd.Series(initial_x_vol, index=initial_x_vol.index, name='v_vol')
+    if model_y is None or model_x is None: continue
 
+    # 3. Forecast Next Step Parameters (GARCH)
+    mu_next, vol_next, nu_next, _ = get_oos_forecast_params(model_y, np.nan) 
+    
+    # 4. Transform Histories (PIT)
+    u_target_exp = transform_to_uniform(model_y).clip(1e-6, 1-1e-6)
+    u_vol_exp = get_conditional_volatility(model_y)
+    v_resid_exp = transform_to_uniform(model_x).clip(1e-6, 1-1e-6)
+    v_vol_exp = get_conditional_volatility(model_x)
+    
+    u_target_exp.replace([np.inf, -np.inf], np.nan, inplace=True)
+    v_resid_exp.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    # *** MODIFIED: Call new create_lagged_features function ***
-    X_train_initial_chall, y_train_initial_chall = create_lagged_features(
-        u_target_full, # Pass the target shock series (y)
-        u_vol_full,    # Pass the target volatility series
-        v_resid_full,  # Pass the source shock series
-        v_vol_full,    # Pass the source volatility series
-        n_lags=N_LAGS
+    # ---------------- TEST 1: GARCH PREDICTION ----------------
+    X_bench_g, y_bench_g, X_chall_g, y_chall_g = create_garch_features(
+        u_target_exp, u_vol_exp, specific_lags, v_resid_exp, v_vol_exp
     )
-    X_train_initial_bench, y_train_initial_bench = create_lagged_features(
-        u_target_full, # Pass the target shock series (y)
-        u_vol_full,    # Pass the target volatility series
-        None,          # No source features for benchmark
-        None,
-        n_lags=N_LAGS
-    )
-
-    if X_train_initial_bench.empty or X_train_initial_chall.empty:
-        print("  Skipping tuning: Not enough initial data for features.")
-        best_params_challenger = XGB_PARAMS
-        best_params_benchmark = XGB_PARAMS
-    else:
-        # Align the initial training sets before tuning
-        common_initial_idx = X_train_initial_chall.index.intersection(X_train_initial_bench.index)
-        X_train_initial_chall = X_train_initial_chall.loc[common_initial_idx]
-        X_train_initial_bench = X_train_initial_bench.loc[common_initial_idx]
-        # Use one common target series after alignment
-        y_train_initial = y_train_initial_chall.loc[common_initial_idx] # Or y_train_initial_bench, they should be identical on common_idx
-
-        # TimeSeriesSplit for cross-validation
-        tscv = TimeSeriesSplit(n_splits=5)
-
-        # --- Tune Challenger Model ---
-        print("    Tuning Challenger model...")
-        xgb_challenger_tune = xgb.XGBRegressor(**XGB_PARAMS)
-        grid_search_challenger = GridSearchCV(
-            estimator=xgb_challenger_tune,
-            param_grid=PARAM_GRID,
-            scoring='neg_mean_squared_error',
-            cv=tscv,
-            n_jobs=-1,
-            verbose=1
-        )
-        grid_search_challenger.fit(X_train_initial_chall, y_train_initial)
-        best_params_challenger = {**XGB_PARAMS, **grid_search_challenger.best_params_}
-        print(f"    Best Challenger Params: {grid_search_challenger.best_params_}")
-
-        # --- Tune Benchmark Model ---
-        print("    Tuning Benchmark model...")
-        xgb_benchmark_tune = xgb.XGBRegressor(**XGB_PARAMS)
-        grid_search_benchmark = GridSearchCV(
-            estimator=xgb_benchmark_tune,
-            param_grid=PARAM_GRID,
-            scoring='neg_mean_squared_error',
-            cv=tscv,
-            n_jobs=-1,
-            verbose=1
-        )
-        grid_search_benchmark.fit(X_train_initial_bench, y_train_initial)
-        best_params_benchmark = {**XGB_PARAMS, **grid_search_benchmark.best_params_}
-        print(f"    Best Benchmark Params: {grid_search_benchmark.best_params_}")
-
-    # --- >>> END OF TUNING SECTION <<< ---
     
-    # --- Store OOS Predictions ---
-    oos_predictions = []
-
-    print(f"  Running expanding window forecast for {len(test_dates)} test points...")
-    for current_date in tqdm(test_dates):
-        yesterday = current_date - pd.Timedelta(days=1)
-        current_train_y_raw = y_series_all.loc[:yesterday]
-        current_train_x_raw = x_series_all.loc[:yesterday]
-        actual_y_raw = y_series_all.loc[current_date] # Need raw for P&L
-
-        # 1. Fit GARCH models to get residuals UP TO YESTERDAY
-        bench_model_fit = fit_best_garch(current_train_y_raw, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
-                                         mean_p=fixed_arma_order_y[0], mean_q=fixed_arma_order_y[1],
-                                         dist=GARCH_DIST)
-        x_model_fit = fit_best_garch(current_train_x_raw, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
-                                     mean_p=fixed_arma_order_x[0], mean_q=fixed_arma_order_x[1],
-                                     dist=GARCH_DIST)
-        if bench_model_fit is None or x_model_fit is None: continue
-            
-        # 2. Extract and Transform Residuals (Uniform Shocks) UP TO YESTERDAY
+    if not X_bench_g.empty and not X_chall_g.empty:
+        # Fit XGBoost on history
+        idx_g = X_bench_g.index.intersection(X_chall_g.index)
+        model_bench_g = xgb.XGBRegressor(**best_params_benchmark_garch).fit(X_bench_g.loc[idx_g], y_bench_g.loc[idx_g])
+        model_chall_g = xgb.XGBRegressor(**best_params_challenger_garch).fit(X_chall_g.loc[idx_g], y_chall_g.loc[idx_g])
         
-        x_resid_is = get_standardized_residuals(x_model_fit)
+        # Create Feature Vector for T+1 (Append dummies and shift)
+        u_target_temp = pd.concat([u_target_exp, pd.Series([0], index=[current_date])])
+        u_vol_temp = pd.concat([u_vol_exp, pd.Series([vol_next], index=[current_date])])
+        v_resid_temp = pd.concat([v_resid_exp, pd.Series([0], index=[current_date])])
+        v_vol_temp = pd.concat([v_vol_exp, pd.Series([0], index=[current_date])]) 
         
-        # *** NEW: Extract volatility ***
-        bench_vol_is = get_conditional_volatility(bench_model_fit)
-        x_vol_is = get_conditional_volatility(x_model_fit)
+        X_b_next, _, X_c_next, _ = create_garch_features(u_target_temp, u_vol_temp, specific_lags, v_resid_temp, v_vol_temp)
         
-        # Create the four series needed for feature generation
+        # Predict Uniform Shock
+        pred_bench_u = model_bench_g.predict(X_b_next.iloc[[-1]])[0]
+        pred_chall_u = model_chall_g.predict(X_c_next.iloc[[-1]])[0]
         
-        u_target_is_full = transform_to_uniform(bench_model_fit)
-        v_resid_is_full = transform_to_uniform(x_model_fit)
+        # Invert PIT (Uniform -> Std -> Raw)
+        dist_cls = model_y.model.distribution
+        d_params = [model_y.params[n] for n in dist_cls.parameter_names()]
+        std_bench = dist_cls.ppf(np.clip(pred_bench_u, 1e-6, 1-1e-6), d_params)
+        std_chall = dist_cls.ppf(np.clip(pred_chall_u, 1e-6, 1-1e-6), d_params)
         
-        u_target_is_full = u_target_is_full.clip(1e-6, 1-1e-6)
-        v_resid_is_full = v_resid_is_full.clip(1e-6, 1-1e-6)
+        final_pred_bench_g = mu_next + vol_next * std_bench
+        final_pred_chall_g = mu_next + vol_next * std_chall
         
-        u_vol_is_full = pd.Series(bench_vol_is, index=bench_vol_is.dropna().index, name='u_vol')
-        v_vol_is_full = pd.Series(x_vol_is, index=x_vol_is.dropna().index, name='v_vol')
-
-
-        if u_target_is_full.empty or v_resid_is_full.empty or u_vol_is_full.empty or v_vol_is_full.empty: continue
-
-        # 3. Create Lagged Feature Sets for Training
-        # *** MODIFIED: Call new create_lagged_features function ***
-        X_challenger, y_challenger = create_lagged_features(
-            u_target_is_full, u_vol_is_full, 
-            v_resid_is_full, v_vol_is_full, 
-            n_lags=N_LAGS
-        )
-        X_benchmark, y_benchmark = create_lagged_features(
-            u_target_is_full, u_vol_is_full, 
-            None, None, 
-            n_lags=N_LAGS
-        )
-
-        if X_benchmark.empty or X_challenger.empty: continue
-
-        # Ensure targets are aligned (they should be)
-        common_train_idx = X_benchmark.index.intersection(X_challenger.index)
-        y_train = y_benchmark.loc[common_train_idx]
-        X_train_bench = X_benchmark.loc[common_train_idx]
-        X_train_chall = X_challenger.loc[common_train_idx]
-
-        if y_train.empty: continue
-
-        # 4. Train XGBoost Models
-        model_bench = xgb.XGBRegressor(**best_params_benchmark)
-        model_chall = xgb.XGBRegressor(**best_params_challenger)
-        
-        model_bench.fit(X_train_bench, y_train)
-        model_chall.fit(X_train_chall, y_train)
-
-        # 5. Create Features for Today's Prediction (using data up to t-1)
-        # *** MODIFIED: Get lags for all 4 feature series ***
-        u_resid_lags = u_target_is_full.iloc[-N_LAGS:].values
-        u_vol_lags = u_vol_is_full.iloc[-N_LAGS:].values
-        v_resid_lags = v_resid_is_full.iloc[-N_LAGS:].values
-        v_vol_lags = v_vol_is_full.iloc[-N_LAGS:].values
-
-        if len(u_resid_lags) < N_LAGS or len(u_vol_lags) < N_LAGS or len(v_resid_lags) < N_LAGS or len(v_vol_lags) < N_LAGS:
-            continue # Not enough history to create features
-
-        # Concatenate in the correct order, reversing to get [t-1, t-2, ...]
-        features_today_bench = np.concatenate([u_resid_lags[::-1], u_vol_lags[::-1]]).reshape(1, -1)
-        features_today_chall = np.concatenate([
-            u_resid_lags[::-1], u_vol_lags[::-1], 
-            v_resid_lags[::-1], v_vol_lags[::-1]
-        ]).reshape(1, -1)
-
-        # Create DataFrame with correct column names for prediction
-        bench_resid_cols = [f'u_target_lag_{i}' for i in range(1, N_LAGS + 1)]
-        bench_vol_cols = [f'u_vol_lag_{i}' for i in range(1, N_LAGS + 1)]
-        bench_cols = bench_resid_cols + bench_vol_cols
-        
-        chall_v_resid_cols = [f'v_resid_lag_{i}' for i in range(1, N_LAGS + 1)]
-        chall_v_vol_cols = [f'v_vol_lag_{i}' for i in range(1, N_LAGS + 1)]
-        chall_cols = bench_cols + chall_v_resid_cols + chall_v_vol_cols
-        
-        X_pred_bench = pd.DataFrame(features_today_bench, columns=bench_cols)
-        X_pred_chall = pd.DataFrame(features_today_chall, columns=chall_cols)
-
-        # 6. Make 1-Step-Ahead Predictions
-        pred_bench = model_bench.predict(X_pred_bench)[0]
-        pred_chall = model_chall.predict(X_pred_chall)[0]
-
-        # 7. Get Actual Shock for Today (for MSE calculation)
-        _, _, _, actual_u_c_t = get_oos_forecast_params(bench_model_fit, actual_y_raw)
-
-        if not np.isfinite(actual_u_c_t): continue
-
-        # 8. Store results for this day
-        oos_predictions.append({
-            "Date": current_date,
-            "Actual_Shock": actual_u_c_t,
-            "Pred_Shock_Bench": pred_bench,
-            "Pred_Shock_Chall": pred_chall,
-            "Actual_Return": actual_y_raw # Store the raw return for Sharpe calculation
+        oos_predictions_garch.append({
+            'Date': current_date,
+            'Actual': actual_y_value,
+            'Pred_Bench': final_pred_bench_g,
+            'Pred_Chall': final_pred_chall_g
         })
 
-    # --- Evaluate OOS Predictions (after loop) ---
-    if len(oos_predictions) < 20:
-        print("  Skipping Evaluation: Not enough valid OOS forecasts generated.")
-        continue
+    # ---------------- TEST 2: VOL PREDICTION ----------------
+    X_bench_v, y_bench_v, X_chall_v, y_chall_v = create_vol_on_garch_features(
+        u_vol_exp, u_target_exp, v_resid_exp, v_vol_exp, specific_lags
+    )
 
-    print("  OOS loop finished. Evaluating ML models...")
-    pred_df = pd.DataFrame(oos_predictions).set_index("Date").dropna()
+    if not X_bench_v.empty and not X_chall_v.empty:
+        idx_v = X_bench_v.index.intersection(X_chall_v.index)
+        model_bench_v = xgb.XGBRegressor(**best_params_benchmark_vol).fit(X_bench_v.loc[idx_v], y_bench_v.loc[idx_v])
+        model_chall_v = xgb.XGBRegressor(**best_params_challenger_vol).fit(X_chall_v.loc[idx_v], y_chall_v.loc[idx_v])
+        
+        # Create Feature Vector
+        u_vol_temp = pd.concat([u_vol_exp, pd.Series([vol_next], index=[current_date])])
+        u_target_temp = pd.concat([u_target_exp, pd.Series([0], index=[current_date])])
+        v_resid_temp = pd.concat([v_resid_exp, pd.Series([0], index=[current_date])])
+        v_vol_temp = pd.concat([v_vol_exp, pd.Series([0], index=[current_date])])
+        
+        X_b_next_v, _, X_c_next_v, _ = create_vol_on_garch_features(u_vol_temp, u_target_temp, v_resid_temp, v_vol_temp, specific_lags)
+        
+        pred_bench_v = model_bench_v.predict(X_b_next_v.iloc[[-1]])[0]
+        pred_chall_v = model_chall_v.predict(X_c_next_v.iloc[[-1]])[0]
+        
+        oos_predictions_vol.append({
+            'Date': current_date,
+            'Pred_Bench_Vol': pred_bench_v,
+            'Pred_Chall_Vol': pred_chall_v,
+            'GARCH_Vol_Proxy': vol_next
+        })
 
-    # 1. Calculate MSE
-    mse_bench = mean_squared_error(pred_df['Actual_Shock'], pred_df['Pred_Shock_Bench'])
-    mse_chall = mean_squared_error(pred_df['Actual_Shock'], pred_df['Pred_Shock_Chall'])
+print("\n" + "="*50)
+print("RESULTS SUMMARY")
+print("="*50)
 
-    # 2. Calculate Sharpe Ratios
-    pred_df['Position_Bench'] = np.where(pred_df['Pred_Shock_Bench'] > TRADING_THRESHOLD_LONG, 1,
-                                  np.where(pred_df['Pred_Shock_Bench'] < TRADING_THRESHOLD_SHORT, -1, 0))
-    pred_df['Position_Chall'] = np.where(pred_df['Pred_Shock_Chall'] > TRADING_THRESHOLD_LONG, 1,
-                                  np.where(pred_df['Pred_Shock_Chall'] < TRADING_THRESHOLD_SHORT, -1, 0))
+# Initialize a list to store the row data for the final table
+summary_rows = []
 
-    pred_df['Return_Bench'] = pred_df['Position_Bench'] * pred_df['Actual_Return']
-    pred_df['Return_Chall'] = pred_df['Position_Chall'] * pred_df['Actual_Return']
-
-    sharpe_bench = calculate_sharpe_ratio(pred_df['Return_Bench'])
-    sharpe_chall = calculate_sharpe_ratio(pred_df['Return_Chall'])
-
-    ml_results.append({
-        "Source_Factor": source_key,
-        "Target_Factor": target_key,
-        "OOS_Days": len(pred_df),
-        "MSE_Benchmark": mse_bench,
-        "MSE_Challenger": mse_chall,
-        "Sharpe_Benchmark": sharpe_bench,
-        "Sharpe_Challenger": sharpe_chall,
-    })
+# --- 1. GARCH Results ---
+if oos_predictions_garch:
+    df_res_g = pd.DataFrame(oos_predictions_garch).set_index('Date')
+    mse_b_g = mean_squared_error(df_res_g['Actual'], df_res_g['Pred_Bench'])
+    mse_c_g = mean_squared_error(df_res_g['Actual'], df_res_g['Pred_Chall'])
     
-    # Save detailed predictions
-    pred_df.to_csv(f"ml_oos_predictions_{source_key}_to_{target_key}.csv")
+    # Diebold-Mariano Test (MSE)
+    dm_stat_g, dm_p_g = diebold_mariano_test(df_res_g['Actual'], df_res_g['Pred_Bench'], df_res_g['Pred_Chall'])
+    
+    # Pesaran-Timmermann Test (Directional Accuracy)
+    pt_stat_b, pt_p_b, acc_b = pesaran_timmermann_test(df_res_g['Actual'], df_res_g['Pred_Bench'])
+    pt_stat_c, pt_p_c, acc_c = pesaran_timmermann_test(df_res_g['Actual'], df_res_g['Pred_Chall'])
+    
+    print(f"\n[TEST 1: GARCH Model (Shock Prediction)]")
+    print(f"  MSE Benchmark:  {mse_b_g:.6f}")
+    print(f"  MSE Challenger: {mse_c_g:.6f}")
+    # Fixed the missing print statement from previous version
+    print(f"  Diebold-Mariano Stat: {dm_stat_g:.4f} (p-val: {dm_p_g:.4f})")
+    print("-" * 30)
+    print(f"  Benchmark Directional Acc: {acc_b:.2%} (PT Stat: {pt_stat_b:.2f}, p: {pt_p_b:.4f})")
+    print(f"  Challenger Directional Acc: {acc_c:.2%} (PT Stat: {pt_stat_c:.2f}, p: {pt_p_c:.4f})")
+    
+    df_res_g.to_csv(OUTPUT_DIR / f"OOS_Res_GARCH_{SOURCE_FACTOR}_to_{TARGET_FACTOR}.csv")
 
+    # Append GARCH results to summary
+    summary_rows.append({
+        'Test': 'GARCH',
+        'Source': SOURCE_FACTOR,
+        'Target': TARGET_FACTOR,
+        'OOS_Days': len(df_res_g),
+        'MSE_Benchmark': mse_b_g,
+        'MSE_Challenger': mse_c_g,
+        'DM_Stat': dm_stat_g,
+        'DM_P_Value': dm_p_g,
+        'Benchmark_Directional_Acc': acc_b,
+        'Benchmark_Directional_P': pt_p_b,
+        'Challenger_Directional_Acc': acc_c,
+        'Challenger_Directional_P': pt_p_c
+    })
 
-# --- Final Output ---
-print("\n" + "=" * 50)
-print("Final OOS Copula-ML (XGBoost) Backtest Results (with Vol Features)")
-print("=" * 50)
-results_table = pd.DataFrame(ml_results)
-print(results_table.to_string(float_format="%.6f"))
+# --- 2. VOL Results ---
+if oos_predictions_vol:
+    df_res_v = pd.DataFrame(oos_predictions_vol).set_index('Date').clip(lower=0)
+    
+    # Compare against GARCH Proxy just for stats
+    mse_b_v = mean_squared_error(df_res_v['GARCH_Vol_Proxy'], df_res_v['Pred_Bench_Vol'])
+    mse_c_v = mean_squared_error(df_res_v['GARCH_Vol_Proxy'], df_res_v['Pred_Chall_Vol'])
+    dm_stat_v, dm_p_v = diebold_mariano_test(df_res_v['GARCH_Vol_Proxy'], df_res_v['Pred_Bench_Vol'], df_res_v['Pred_Chall_Vol'])
 
-# Save results
-results_table.to_csv("copula_ml_oos_results_with_vol.csv", index=False)
-print("\nSummary results saved to 'copula_ml_oos_results_with_vol.csv'")
+    print(f"\n[TEST 2: VOL Model (Volatility Prediction)]")
+    print(f"  (Comparing against GARCH forecast proxy)")
+    print(f"  MSE Benchmark:  {mse_b_v:.6f}")
+    print(f"  MSE Challenger: {mse_c_v:.6f}")
+    print(f"  Diebold-Mariano Stat: {dm_stat_v:.4f} (p-val: {dm_p_v:.4f})")
+    
+    df_res_v.to_csv(OUTPUT_DIR / f"OOS_Res_VOL_{SOURCE_FACTOR}_to_{TARGET_FACTOR}.csv")
+
+    # Append VOL results to summary
+    # Note: Directional Accuracy (PT Test) is NaN for Vol because Vol is always positive
+    summary_rows.append({
+        'Test': 'VOL',
+        'Source': SOURCE_FACTOR,
+        'Target': TARGET_FACTOR,
+        'OOS_Days': len(df_res_v),
+        'MSE_Benchmark': mse_b_v,
+        'MSE_Challenger': mse_c_v,
+        'DM_Stat': dm_stat_v,
+        'DM_P_Value': dm_p_v,
+        'Benchmark_Directional_Acc': np.nan, 
+        'Benchmark_Directional_P': np.nan,
+        'Challenger_Directional_Acc': np.nan,
+        'Challenger_Directional_P': np.nan
+    })
+
+# --- 3. Save Final Summary Table ---
+if summary_rows:
+    summary_df = pd.DataFrame(summary_rows)
+    
+    # Define Column Order
+    cols = [
+        'Test', 'Source', 'Target', 'OOS_Days', 
+        'MSE_Benchmark', 'MSE_Challenger', 
+        'DM_Stat', 'DM_P_Value', 
+        'Benchmark_Directional_Acc', #'Benchmark_Directional_P', 
+        'Challenger_Directional_Acc', #'Challenger_Directional_P'
+    ]
+    summary_df = summary_df[cols]
+    
+    summary_filename = OUTPUT_DIR / f"Final_Summary_{SOURCE_FACTOR}_to_{TARGET_FACTOR}.csv"
+    summary_df.to_csv(summary_filename, index=False)
+    print(f"\nFinal summary table saved to: {summary_filename}")
+    print(summary_df)
+
+print("\nDone.")

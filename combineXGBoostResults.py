@@ -3,7 +3,7 @@ from pathlib import Path
 
 # --- Configuration ---
 # Set this to the same OUTPUT_DIR from your main script
-RESULTS_DIR = Path("Results/ML")
+RESULTS_DIR = Path("Results/ML/Winsor")
 
 # This is the prefix your main script uses for its summary files
 FILE_PATTERN = "XG_results_*.csv"

@@ -44,12 +44,12 @@ cryptos = ['BNB', 'BTC', 'ETH', 'XRP']
 tests_to_run = (
     
     [(coin, 'LogVolChange') for coin in stablecoins] +
-    [(coin, 'Delta_LogRV') for coin in stablecoins] +
+    [(coin, 'Delta_LogGK') for coin in stablecoins] +
     [(coin, 'Log Returns') for coin in stablecoins] +
     
     [(coin, 'LogVolChange') for coin in cryptos] +
     [(coin, 'Log Returns') for coin in cryptos] +
-    [(coin, 'Delta_LogRV') for coin in cryptos]
+    [(coin, 'Delta_LogGK') for coin in cryptos]
 )
 
 coin_data = {}

@@ -5,6 +5,7 @@ from scipy.special import betaln
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from statsmodels.tsa.ar_model import ar_select_order
+from scipy.stats.mstats import winsorize 
 import json
 import warnings
 from tqdm import tqdm 
@@ -12,7 +13,7 @@ from tqdm import tqdm
 warnings.filterwarnings('ignore')
 
 # ===================================================================
-# USER CONFIGURATION (TOGGLE DIRECTION HERE)
+# USER CONFIGURATION
 # ===================================================================
 
 # Set to True for Forward (Stable -> Crypto), False for Reverse (Crypto -> Stable)
@@ -20,41 +21,53 @@ RUN_FORWARD_TEST = True
 
 if RUN_FORWARD_TEST:
     DIRECTION_NAME = "StableCrypto"
-    # Source = Stablecoin, Target = Crypto
     TESTS_TO_RUN = [
+        
         ("Stable_Volume", "Crypto_Volatility"),
         ("Stable_Volatility", "Crypto_Volatility"),
         ("Stable_Volume", "Crypto_Returns"),
         ("Stable_Volatility", "Crypto_Returns"),
+        
+        
+        # ("Stable_Returns", "Crypto_Volatility"),
+        # ("Stable_Returns", "Crypto_Returns"),
+        # ("Stable_Returns", "Crypto_Volume"),
+        
+        
+        # ("Stable_Volume", "Crypto_Volume"),
+        # ("Stable_Volatility", "Crypto_Volume"),
     ]
 else:
     DIRECTION_NAME = "CryptoStable"
-    # Source = Crypto, Target = Stablecoin
     TESTS_TO_RUN = [
+        # Original Crypto -> Stable
         ("Crypto_Returns", "Stable_Volume"),
         ("Crypto_Returns", "Stable_Volatility"),
         ("Crypto_Volatility", "Stable_Volume"),
         ("Crypto_Volatility", "Stable_Volatility"),
+
+        # ("Crypto_Volume", "Stable_Volume"),
+        # ("Crypto_Volume", "Stable_Volatility"),
+        # ("Crypto_Volume", "Stable_Returns"),
+
+        # ("Crypto_Returns", "Stable_Returns"),
+        # ("Crypto_Volatility", "Stable_Returns"),
     ]
 
 # Common Settings
 DATA_DIR = Path("Data/Verified")
-OUTPUT_DIR = Path("Results/Granger")
+OUTPUT_DIR = Path("Results/GrangerCopula")
 START_DATE = '2020-01-01'
 END_DATE = '2024-01-01'
 N_BOOT = 200
-STATIONARY_VOL = "Delta_LogRV"
-MAXLAGS = 7
-INFO_CRITERION = 'aic'
-MAX_LAGS_DICT = {
-    "Stable_Volume": MAXLAGS,      
-    "Stable_Volatility": MAXLAGS,  
-    "Crypto_Returns": MAXLAGS,     
-    "Crypto_Volatility": MAXLAGS   
-}
+STATIONARY_VOL = "Delta_LogGK"
+MAXLAGS = 1
+INFO_CRITERION = 'aic' #At maxlag = 1 this has no effect as it will always choose the single lag
+WINSOR_QUANTILE = 0.01
+RANDOM_STATE = 123
 
 # ===================================================================
-# Core Copula Granger Causality Functions (OPTIMIZED VERSION)
+# Core Copula Granger Causality Functions
 # ===================================================================
 def kernelWeights(query, samples, h):
     q2 = np.sum(query**2, axis=1, keepdims=True)
@@ -139,7 +152,7 @@ def bootstrapGC(x, y, lag=1, n_boot=200, m_bern=10, h=None, random_state=None):
 # Main Execution
 # ===================================================================
 if __name__ == "__main__":
-    print(f"Starting {DIRECTION_NAME} Copula Granger Causality Analysis...")
+    print(f"Starting {DIRECTION_NAME} Copula Granger Causality Analysis (Winsorized)...")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Data
@@ -149,16 +162,33 @@ if __name__ == "__main__":
             df = pd.read_csv(file, parse_dates=['Date']).sort_values("Date")
             coin_data[c] = df[(df['Date'] >= START_DATE) & (df['Date'] <= END_DATE)].set_index('Date')
 
-    # 2. Create Factors
+    # 2. Create Factors (MODIFIED TO INCLUDE WINSORIZATION)
     def get_fac(coins, var, name):
-        df = pd.concat([coin_data[c][var] for c in coins], axis=1, keys=coins, join='inner').dropna()
+        # Concatenate raw data
+        df_list = [coin_data[c][var] for c in coins if c in coin_data]
+        if not df_list: 
+             print(f"Warning: Missing data for {name}")
+             return pd.Series(dtype=float)
+
+        df = pd.concat(df_list, axis=1, keys=coins, join='inner').dropna()
+        
+        # Winsorize before PCA
+        for col in df.columns:
+            df[col] = winsorize(df[col], limits=[WINSOR_QUANTILE, WINSOR_QUANTILE])
+
+        # Fit PCA
         pca = PCA(1).fit(StandardScaler().fit_transform(df))
         print(f"{name} Exp. Var: {pca.explained_variance_ratio_[0]:.2%}")
+        
+        # Transform and return
         return pd.Series(pca.transform(StandardScaler().fit_transform(df)).ravel(), index=df.index, name=name)
 
     factors = {
         "Stable_Volume": get_fac(["DAI", "USDC", "USDT"], "LogVolChange", "PC1_S_Vol"),
         "Stable_Volatility": get_fac(["DAI", "USDC", "USDT"], STATIONARY_VOL, "PC1_S_Vola"),
+        "Stable_Returns": get_fac(["DAI", "USDC", "USDT"], "Log Returns", "PC1_S_Ret"), # NEW
+        
+        "Crypto_Volume": get_fac(["BNB", "BTC", "ETH", "XRP"], "LogVolChange", "PC1_C_Vol"), # NEW
         "Crypto_Returns": get_fac(["BNB", "BTC", "ETH", "XRP"], "Log Returns", "PC1_C_Ret"),
         "Crypto_Volatility": get_fac(["BNB", "BTC", "ETH", "XRP"], STATIONARY_VOL, "PC1_C_Vola")
     }
@@ -168,13 +198,18 @@ if __name__ == "__main__":
     print("-" * 50)
     for src, tgt in TESTS_TO_RUN:
         print(f"Testing: {src} -> {tgt}")
+        if src not in factors or tgt not in factors:
+            print(f"  Skipping: {src} or {tgt} not found in factors.")
+            continue
+            
         y_ser = factors[tgt]
+        if y_ser.empty: 
+            print(f"  Skipping: Target {tgt} is empty.")
+            continue
 
-        max_lag = MAX_LAGS_DICT.get(tgt)
-        opt_lag = max(ar_select_order(y_ser, maxlag=max_lag, ic=INFO_CRITERION).ar_lags or [1])
-        opt_lag = MAXLAGS
-        
-        print(f"  Optimal Lag (AIC): {opt_lag}")
+        # Note: We force MAXLAGS here per your previous config
+        opt_lag = MAXLAGS 
+        print(f"  Lag: {opt_lag}")
 
         df = pd.concat([factors[src], y_ser], axis=1, join='inner').dropna()
         x, y = df.iloc[:, 0].values, df.iloc[:, 1].values
@@ -182,7 +217,7 @@ if __name__ == "__main__":
         if len(x) > opt_lag + 1:
             gc = calcGC(x, y, lag=opt_lag)
             print("  Bootstrapping...")
-            null_dist = bootstrapGC(x, y, lag=opt_lag, n_boot=N_BOOT, random_state=123)
+            null_dist = bootstrapGC(x, y, lag=opt_lag, n_boot=N_BOOT, random_state=RANDOM_STATE)
             pval = np.mean(null_dist >= gc)
             print(f"  -> GC: {gc:.4f}, p-val: {pval:.4f}\n")
             
@@ -192,4 +227,4 @@ if __name__ == "__main__":
     # 4. Save
     pd.DataFrame(results).to_csv(OUTPUT_DIR / f"GC_Results_{DIRECTION_NAME}_{MAXLAGS}.csv", index=False)
     pd.DataFrame(nulls).to_csv(OUTPUT_DIR / f"GC_Nulls_{DIRECTION_NAME}_{MAXLAGS}.csv", index=False)
-    print(f"Done. Saved to {OUTPUT_DIR / f"GC_Nulls_{DIRECTION_NAME}_{MAXLAGS}.csv"}")
+    print(f"Done. Saved to {OUTPUT_DIR}")
