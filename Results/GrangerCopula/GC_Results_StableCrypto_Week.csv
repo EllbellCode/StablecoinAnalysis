@@ -1,0 +1,5 @@
+Source,Target,InputScope,GC,p-value
+Stable_Volume,Crypto_Volatility,Week,0.013443943829958237,0.0
+Stable_Volatility,Crypto_Volatility,Week,0.011233517678404399,0.0
+Stable_Volume,Crypto_Returns,Week,0.007048014775506118,0.13
+Stable_Volatility,Crypto_Returns,Week,0.003463031108964369,0.96

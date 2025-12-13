@@ -1,0 +1,5 @@
+Source,Target,InputScope,GC,p-value
+Stable_Volume,Crypto_Volatility,Month,0.025048258282536155,0.0
+Stable_Volatility,Crypto_Volatility,Month,0.008872544131741213,0.0
+Stable_Volume,Crypto_Returns,Month,0.011376863634339046,0.0
+Stable_Volatility,Crypto_Returns,Month,0.003609375908973622,0.935

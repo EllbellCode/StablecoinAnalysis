@@ -8,10 +8,10 @@ import re
 
 # --- 1. Setup ---
 input_dir = Path("Results/GrangerCopula")
-output_dir = Path("Plots/Granger")
+output_dir = Path("Plots/GrangerCopula")
 output_dir.mkdir(parents=True, exist_ok=True) 
 
-# Find all NULLS files (including those with _Win)
+# Find all NULLS files
 nulls_files = list(input_dir.glob("GC_Nulls_*.csv"))
 
 if not nulls_files:
@@ -23,8 +23,7 @@ else:
 for nulls_file_path in nulls_files:
     
     # --- A. Find Corresponding RESULTS file ---
-    # This simple replace works for both standard and winsorized files
-    # e.g., GC_Nulls_StableCrypto_7_Win.csv -> GC_Results_StableCrypto_7_Win.csv
+    # e.g., GC_Nulls_StableCrypto_Week.csv -> GC_Results_StableCrypto_Week.csv
     results_file_name = nulls_file_path.name.replace('GC_Nulls_', 'GC_Results_')
     results_file_path = input_dir / results_file_name
     
@@ -34,8 +33,9 @@ for nulls_file_path in nulls_files:
         
     try:
         results_df = pd.read_csv(results_file_path)
-        results_df['Source'] = results_df['Source'].str.strip()
-        results_df['Target'] = results_df['Target'].str.strip()
+        # Strip whitespace just in case
+        if 'Source' in results_df.columns: results_df['Source'] = results_df['Source'].str.strip()
+        if 'Target' in results_df.columns: results_df['Target'] = results_df['Target'].str.strip()
         results_df.set_index(['Source', 'Target'], inplace=True)
     except Exception as e:
         print(f"  CRITICAL ERROR: Failed to load results file {results_file_path.name}. Error: {e}. Skipping.")
@@ -44,26 +44,22 @@ for nulls_file_path in nulls_files:
     # --- B. Load the NULLS file ---
     try:
         nulls_df = pd.read_csv(nulls_file_path)
-        nulls_df['Source'] = nulls_df['Source'].str.strip()
-        nulls_df['Target'] = nulls_df['Target'].str.strip()
+        if 'Source' in nulls_df.columns: nulls_df['Source'] = nulls_df['Source'].str.strip()
+        if 'Target' in nulls_df.columns: nulls_df['Target'] = nulls_df['Target'].str.strip()
     except Exception as e:
         print(f"  Error reading {nulls_file_path.name}: {e}. Skipping.")
         continue
 
-    # --- UPDATED REGEX for Lag and Winsorization ---
-    # Matches: _7.csv OR _7_Win.csv OR _7_win.csv
-    lag_match = re.search(r'_(\d+)(?:_([Ww]in))?\.csv$', nulls_file_path.name)
+    # --- UPDATED REGEX: Extract Scope (Day/Week/Month) ---
+    # Looks for the suffix after the last underscore, e.g., "..._Week.csv" -> "Week"
+    scope_match = re.search(r'_([A-Za-z0-9]+)\.csv$', nulls_file_path.name)
     
-    if lag_match:
-        lag = lag_match.group(1)
-        is_winsorized = bool(lag_match.group(2)) # True if group 2 exists (Win/win)
+    if scope_match:
+        scope = scope_match.group(1)
     else:
-        lag = "Unknown"
-        is_winsorized = False
+        scope = "Unknown"
     
-    win_status = "Winsorized" if is_winsorized else "Raw"
-    
-    print(f"\n--- Processing {nulls_file_path.name} (Lag {lag}, {win_status}) ---")
+    print(f"\n--- Processing {nulls_file_path.name} (Scope: {scope}) ---")
 
     # --- 3. Inner Loop ---
     for _, nulls_row in nulls_df.iterrows():
@@ -77,6 +73,10 @@ for nulls_file_path in nulls_files:
         # --- D. Look up Stats ---
         try:
             stats_row = results_df.loc[(source_name, target_name)]
+            # Handle duplicates if they exist
+            if isinstance(stats_row, pd.DataFrame):
+                stats_row = stats_row.iloc[0]
+                
             gc_test_stat = stats_row.get('GC')
             p_value = stats_row.get('p-value')
         except KeyError:
@@ -95,36 +95,39 @@ for nulls_file_path in nulls_files:
         
         # --- F. Create Plot ---
         plt.figure(figsize=(12, 7))
-        sns.histplot(null_dist, bins=30, kde=True, color='teal' if is_winsorized else 'skyblue', 
-                     label=f'Null Dist ({win_status})')
+        # Use a distinct color for the new analysis style
+        sns.histplot(null_dist, bins=30, kde=True, color='mediumpurple', 
+                     label='Null Dist (Bootstrap)')
         
         # --- G. Add Stats ---
         if gc_test_stat is not None and p_value is not None:
-            plt.axvline(gc_test_stat, color='red', linestyle='--', linewidth=2, 
+            plt.axvline(gc_test_stat, color='darkorange', linestyle='--', linewidth=2.5, 
                         label=f'Observed GC: {gc_test_stat:.4f}')
             
-            stats_text = f'p-value = {p_value:.4f}\n({win_status})'
+            # Text box with Scope info
+            stats_text = f'p-value = {p_value:.4f}\n(Predictor: {scope})'
             plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=12,
                      verticalalignment='top', horizontalalignment='right',
-                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
         
-        title = f'Copula GC Null Distribution: {source_name} -> {target_name}\n(Lag {lag} | {win_status})'
-        plt.title(title, fontsize=16)
+        title = f'Copula GC Null Distribution: {source_name} -> {target_name}\n(Input Scope: {scope} -> Target: Daily)'
+        plt.title(title, fontsize=15, fontweight='bold')
         plt.xlabel('Copula Granger Causality Statistic', fontsize=12)
         plt.ylabel('Frequency', fontsize=12)
-        plt.legend()
-        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.legend(loc='upper left')
+        plt.grid(True, linestyle='--', alpha=0.5)
         
-        # --- Save Plot with Suffix ---
-        filename = f"Null_{source_name}_to_{target_name}_lag_{lag}.png"
+        # --- Save Plot with Scope Suffix ---
+        # e.g., Null_Stable_Volume_to_Crypto_Volatility_Week.png
+        filename = f"Null_{source_name}_to_{target_name}_{scope}.png"
         output_path = output_dir / filename 
         
         try:
             plt.savefig(output_path)
-            print(f"  Saved plot to {output_path}")
+            # print(f"  Saved plot to {output_path}")
         except Exception as e:
             print(f"  Error saving plot {output_path}: {e}")
             
         plt.close()
 
-print("\nAll plots saved successfully.")
+print("\nAll plots processed successfully.")

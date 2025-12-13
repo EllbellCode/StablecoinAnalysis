@@ -15,17 +15,19 @@ sns.set_theme(style="whitegrid")
 # Configuration
 # ===================================================================
 DATA_DIR = Path("Data/Verified")
-OUTPUT_DIR = Path("Plots/PCA") 
+OUTPUT_DIR = Path("Plots/PCA")
+RESULTS_DIR = Path("Results/PCA")
 
 START_DATE = '2020-01-01'
 TRAIN_END_DATE = '2024-01-01' 
-STATIONARY_VOL = "Delta_LogRV"
+STATIONARY_VOL = "Delta_LogGK"
 
 STABLECOINS = ["DAI", "USDC", "USDT"]
 CRYPTOS = ["BNB", "BTC", "ETH", "XRP"]
 ALL_COINS = STABLECOINS + CRYPTOS
 
 WINSORIZE_QUANTILE = 0.01 #set to 0 to remove winsorizing
+
 # ===================================================================
 # Helper Functions
 # ===================================================================
@@ -52,37 +54,23 @@ def horn_parallel_analysis(n_observations, n_variables, n_iterations=100, percen
     """
     print(f"Running Horn's Parallel Analysis (Iter={n_iterations}, P={percentile}%)...")
     
-    # Store eigenvalues from random data
     random_eigenvalues = np.zeros((n_iterations, n_variables))
     
     for i in range(n_iterations):
-        # 1. Generate random, uncorrelated data
         random_data = np.random.normal(size=(n_observations, n_variables))
-        
-        # 2. Standardize it (just as we do with real data)
         scaler = StandardScaler()
         random_scaled = scaler.fit_transform(random_data)
-        
-        # 3. Run PCA
         pca_random = PCA(n_components=n_variables)
         pca_random.fit(random_scaled)
-        
-        # 4. Store the eigenvalues
         random_eigenvalues[i, :] = pca_random.explained_variance_
         
-    # Get the 95th percentile eigenvalue for each component
     threshold_eigenvalues = np.percentile(random_eigenvalues, percentile, axis=0)
-    
     return threshold_eigenvalues
 
-# === MODIFIED FUNCTION ===
 def run_pca_analysis(coins, var, data_dict, train_end_date, win_limits=(WINSORIZE_QUANTILE, WINSORIZE_QUANTILE)):
     """
     Extracts training data, WINSORIZES it, standardizes it, fits full PCA, 
     runs Horn's analysis, and returns PCA results.
-    
-    win_limits: Tuple (lower, upper) percentage to cut. 
-                e.g., (0.01, 0.01) replaces the bottom 1% and top 1%.
     """
     df_list = [data_dict[coin][var] for coin in coins if coin in data_dict and var in data_dict[coin].columns]
     if not df_list:
@@ -92,19 +80,15 @@ def run_pca_analysis(coins, var, data_dict, train_end_date, win_limits=(WINSORIZ
     data_matrix = pd.concat(df_list, axis=1, keys=coins, join='inner')
     data_matrix.dropna(inplace=True) 
 
-    # STRICT TRAIN SPLIT
     train_matrix = data_matrix.loc[START_DATE:train_end_date].copy()
 
     if train_matrix.empty:
         print(f"Warning: No training data found between {START_DATE} and {train_end_date} for {var}.")
         return None, None, None, None, 0
 
-    # --- NEW: WINSORIZATION STEP ---
     print(f"Winsorizing data (Limits: {win_limits}) before PCA...")
-    # Winsorize column by column to preserve dataframe structure
     for col in train_matrix.columns:
         train_matrix[col] = winsorize(train_matrix[col], limits=win_limits)
-    # -------------------------------
 
     print(f"Fitting PCA on {len(train_matrix)} observation days (Train End: {train_end_date})")
 
@@ -112,41 +96,26 @@ def run_pca_analysis(coins, var, data_dict, train_end_date, win_limits=(WINSORIZ
     train_scaled = scaler.fit_transform(train_matrix)
     
     n_components = train_scaled.shape[1]
-    
-    # --- Run Horn's Analysis ---
     n_obs, n_vars = train_scaled.shape
     horn_thresholds = horn_parallel_analysis(n_obs, n_vars)
-    # ---------------------------
     
     pca = PCA(n_components=n_components)
-    
-    # Fit and transform to get the actual PC series
     pca_data = pca.fit_transform(train_scaled)
     
-    # --- Compare eigenvalues ---
     real_eigenvalues = pca.explained_variance_
     n_significant_pcs = np.sum(real_eigenvalues > horn_thresholds)
     
-    # Create a pandas Series, preserving the index
     pc1_series_with_dates = pd.Series(pca_data[:, 0], 
                                       index=train_matrix.index, 
                                       name="PC1")
     
     return pca, train_matrix.columns, pc1_series_with_dates, horn_thresholds, n_significant_pcs
 
-# === END MODIFIED FUNCTION ===
-
-
 def plot_scree(pca, horn_thresholds, n_significant_pcs, factor_name, coin_list, output_dir):
-    """
-    Plots and saves combined Scree (Eigenvalues vs. Horn's) and Cumulative Variance plot.
-    """
     if pca is None: return
 
     n_components = len(pca.explained_variance_)
     ind = np.arange(1, n_components + 1)
-    
-    # --- Get Real Eigenvalues and Variance Ratios ---
     real_eigenvalues = pca.explained_variance_
     var_ratio = pca.explained_variance_ratio_
     cum_var_ratio = np.cumsum(var_ratio)
@@ -154,22 +123,17 @@ def plot_scree(pca, horn_thresholds, n_significant_pcs, factor_name, coin_list, 
     plt.figure(figsize=(10, 6))
     ax1 = plt.gca()
     
-    # --- Plot 1: Real Eigenvalues (Bars) ---
     bars = ax1.bar(ind, real_eigenvalues, color='royalblue', alpha=0.7, label='Actual Eigenvalues')
     
-    # === ADDED: Annotation loop for percentage labels ===
     for i, bar in enumerate(bars):
         height = bar.get_height()
-        # Use the variance ratio for the label
         label_text = f'{var_ratio[i]:.1%}'
         ax1.annotate(label_text, 
                      xy=(bar.get_x() + bar.get_width() / 2, height),
-                     xytext=(0, 3),  # 3 points vertical offset
+                     xytext=(0, 3), 
                      textcoords="offset points",
                      ha='center', va='bottom', fontsize=9)
-    # ====================================================
 
-    # --- Plot 2: Horn's Threshold (Line) ---
     ax1.plot(ind, horn_thresholds, color='red', marker='o', linestyle='--', 
              linewidth=2, label="Horn's 95th Percentile (Noise)")
     
@@ -177,7 +141,6 @@ def plot_scree(pca, horn_thresholds, n_significant_pcs, factor_name, coin_list, 
     ax1.set_ylabel('Eigenvalue (Variance)', color='royalblue')
     ax1.set_xticks(ind)
     
-    # --- Plot 3: Cumulative Variance (on secondary axis) ---
     ax2 = ax1.twinx()
     ax2.plot(ind, cum_var_ratio, color='darkorange', marker='s', 
              linewidth=2, label='Cumulative Variance')
@@ -186,13 +149,9 @@ def plot_scree(pca, horn_thresholds, n_significant_pcs, factor_name, coin_list, 
 
     plt.title(f'PCA Scree Plot & Horn\'s Analysis: {factor_name}\n(Training Data: {START_DATE} to {TRAIN_END_DATE})')
     
-    # --- Combine legends ---
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    
-    # === MODIFIED: Changed legend location ===
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
-    # =========================================
     
     plt.tight_layout()
 
@@ -211,24 +170,18 @@ def plot_scree(pca, horn_thresholds, n_significant_pcs, factor_name, coin_list, 
         print(f"{'PC' + str(i+1):<12} | {real_eigenvalues[i]:<18.4f} | {horn_thresholds[i]:<18.4f} | {is_sig:<12}")
     print("-" * 55)
 
-
 def plot_pc1_distribution(pc1_series, factor_name, output_dir):
-    """Plots the histogram and KDE of the PC1 time series with stats."""
     if pc1_series is None or len(pc1_series) == 0: return
 
     plt.figure(figsize=(8, 6))
-    
-    # Plot Histogram with KDE
     sns.histplot(pc1_series, kde=True, stat='density', color='teal', 
                  edgecolor='white', alpha=0.6, line_kws={'linewidth': 2})
 
-    # Calculate Stats
     mu_val = np.mean(pc1_series)
     std_val = np.std(pc1_series)
     skew_val = skew(pc1_series)
-    kurt_val = kurtosis(pc1_series) # Fisher kurtosis (normal = 0)
+    kurt_val = kurtosis(pc1_series)
 
-    # Add stats box
     stats_text = (f"Mean: {mu_val:.2f}\n"
                   f"Std Dev: {std_val:.2f}\n"
                   f"Skewness: {skew_val:.2f}\n"
@@ -249,10 +202,7 @@ def plot_pc1_distribution(pc1_series, factor_name, output_dir):
     print(f"Distribution plot saved to: {save_path}")
     plt.close()
 
-
-# === NEW FUNCTION ===
 def plot_pc1_over_time(pc1_series, factor_name, output_dir):
-    """Plots the PC1 factor as a time series."""
     if pc1_series is None or pc1_series.empty:
         print(f"Skipping time series plot for {factor_name}: No data.")
         return
@@ -265,7 +215,6 @@ def plot_pc1_over_time(pc1_series, factor_name, output_dir):
     plt.xlabel('Date')
     plt.ylabel('PC1 Value (Standardized Units)')
     
-    # Add a horizontal line at 0 for reference
     plt.axhline(0, color='red', linestyle='--', linewidth=0.8, label='Zero Line')
     plt.legend()
     
@@ -277,8 +226,6 @@ def plot_pc1_over_time(pc1_series, factor_name, output_dir):
     print(f"Time series plot saved to: {save_path}")
     plt.close()
 
-# === END NEW FUNCTION ===
-
 
 # ===================================================================
 # Main Execution
@@ -286,6 +233,7 @@ def plot_pc1_over_time(pc1_series, factor_name, output_dir):
 
 if __name__ == "__main__":
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
         coin_data = load_data(DATA_DIR, ALL_COINS, START_DATE)
@@ -304,8 +252,8 @@ if __name__ == "__main__":
 
     print("\nStarting PCA Analysis (Training Data Only)...\n")
     
-    # === ADDED: List to store summary results ===
     summary_results = []
+    all_loadings_list = []
     
     for title, coins, var_name in analysis_groups:
         print(f"\nProcessing: {title}")
@@ -317,13 +265,8 @@ if __name__ == "__main__":
         if pca_result is not None:
             plot_scree(pca_result, horn_thresholds, n_sig_pcs, title, coin_cols, OUTPUT_DIR)
             plot_pc1_distribution(pc1_series, title, OUTPUT_DIR)
-            
-            # === ADDED: Call to the new plotting function ===
             plot_pc1_over_time(pc1_series, title, OUTPUT_DIR)
-            # ===============================================
             
-            # === ADDED: Calculate and store summary data ===
-            # Sum variance of *only* the significant components
             total_var_explained = np.sum(pca_result.explained_variance_ratio_[:n_sig_pcs])
             
             summary_results.append({
@@ -331,10 +274,24 @@ if __name__ == "__main__":
                 "Number of significant PCs": n_sig_pcs,
                 "Total Variance Explained": total_var_explained
             })
+
+            # --- MODIFIED: Extract and Store ONLY PC1 Loadings ---
+            # pca_result.components_ has shape (n_components, n_features)
+            # Row 0 is PC1
+            pc1_vector = pca_result.components_[0]
+            
+            # Create a dataframe for this group's PC1 loadings
+            group_loadings = pd.DataFrame({
+                'Group': title,
+                'Coin': coin_cols,
+                'PC1_Loading': pc1_vector
+            })
+            
+            all_loadings_list.append(group_loadings)
+            # ---------------------------------------
             
         else:
             print(f"Skipping {title} due to lack of data.")
-            # === ADDED: Store placeholder for skipped data ===
             summary_results.append({
                 "Variable": title,
                 "Number of significant PCs": 0,
@@ -343,16 +300,25 @@ if __name__ == "__main__":
             
     print(f"\nAnalysis Complete. Plots saved to {OUTPUT_DIR.absolute()}")
 
-    # === ADDED: Create and print the final summary table ===
+    # 1. Print Summary Table
     summary_df = pd.DataFrame(summary_results)
     
     print("\n" + "="*70)
     print("           PCA Summary Table (Training Data)")
     print("="*70)
-    
-    # Format the dataframe for clean printing
     print(summary_df.to_string(
         index=False,
         formatters={'Total Variance Explained': '{:,.2%}'.format}
     ))
     print("="*70)
+
+    # 2. Save Loadings Table (PC1 Only)
+    if all_loadings_list:
+        final_loadings_df = pd.concat(all_loadings_list, ignore_index=True)
+        loadings_path = RESULTS_DIR / "PCA_Loadings.csv"
+        final_loadings_df.to_csv(loadings_path, index=False)
+        print(f"\nPCA PC1 Loadings saved to: {loadings_path}")
+        print("-" * 70)
+        # Optional: Print preview
+        print(final_loadings_df.head(10))
+        print("-" * 70)

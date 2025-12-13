@@ -2,69 +2,141 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from scipy.special import betaln
+from scipy.stats.mstats import winsorize
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from statsmodels.tsa.ar_model import ar_select_order
-from scipy.stats.mstats import winsorize 
 import json
 import warnings
-from tqdm import tqdm 
+from tqdm import tqdm
 
 warnings.filterwarnings('ignore')
+
+# Script to Test Copula Granger Causality on Daily/Weekly/Monthly Horizons
+# "Does todays/the last week/the last month have causality for tomorrow?"
+# Use an expanding window PCA to prevent data leakage
+# Winsorise at 0.01 and 0.99 quantiles to mitigate effects of black swan events
+#  Using a single copula for the 4 year period. Could fit every year to see how the dependence changes over time?
 
 # ===================================================================
 # USER CONFIGURATION
 # ===================================================================
 
-# Set to True for Forward (Stable -> Crypto), False for Reverse (Crypto -> Stable)
+# 1. INPUT SCOPE (The Predictor)
+#    - "Day":   Uses Daily metrics (Today -> Tomorrow)
+#    - "Week":  Uses Weekly metrics (Last 7 Days Rolling -> Tomorrow)
+#    - "Month": Uses Monthly metrics (Last 30 Days Rolling -> Tomorrow)
+INPUT_SCOPE = "Month" 
+
+# 2. TEST DIRECTION
 RUN_FORWARD_TEST = True
 
 if RUN_FORWARD_TEST:
     DIRECTION_NAME = "StableCrypto"
     TESTS_TO_RUN = [
-        
         ("Stable_Volume", "Crypto_Volatility"),
         ("Stable_Volatility", "Crypto_Volatility"),
         ("Stable_Volume", "Crypto_Returns"),
         ("Stable_Volatility", "Crypto_Returns"),
-        
-        
-        # ("Stable_Returns", "Crypto_Volatility"),
-        # ("Stable_Returns", "Crypto_Returns"),
-        # ("Stable_Returns", "Crypto_Volume"),
-        
-        
-        # ("Stable_Volume", "Crypto_Volume"),
-        # ("Stable_Volatility", "Crypto_Volume"),
     ]
 else:
     DIRECTION_NAME = "CryptoStable"
     TESTS_TO_RUN = [
-        # Original Crypto -> Stable
         ("Crypto_Returns", "Stable_Volume"),
         ("Crypto_Returns", "Stable_Volatility"),
         ("Crypto_Volatility", "Stable_Volume"),
         ("Crypto_Volatility", "Stable_Volatility"),
-
-        # ("Crypto_Volume", "Stable_Volume"),
-        # ("Crypto_Volume", "Stable_Volatility"),
-        # ("Crypto_Volume", "Stable_Returns"),
-
-        # ("Crypto_Returns", "Stable_Returns"),
-        # ("Crypto_Volatility", "Stable_Returns"),
     ]
 
-# Common Settings
+# 3. SETTINGS
 DATA_DIR = Path("Data/Verified")
 OUTPUT_DIR = Path("Results/GrangerCopula")
 START_DATE = '2020-01-01'
 END_DATE = '2024-01-01'
 N_BOOT = 200
-STATIONARY_VOL = "Delta_LogGK"
-MAXLAGS = 1
-INFO_CRITERION = 'aic' #At maxlag = 1 this has no effect as it will always choose the single lag
 WINSOR_QUANTILE = 0.01
 RANDOM_STATE = 123
+MAXLAGS = 1
+MIN_PCA_PERIODS = 30  #Minimum days required to fit the first PCA
+
+# ===================================================================
+# Data Loading & Processing
+# ===================================================================
+
+SCOPE_SUFFIXES = {
+    "Day": "",
+    "Week": "_Weekly",
+    "Month": "_Monthly"
+}
+
+VAR_MAP = {
+    "Volume": "LogVolChange",
+    "Volatility": "Delta_LogGK",
+    "Returns": "Log Returns"
+}
+
+def get_column_name(metric_type, scope):
+    base = VAR_MAP.get(metric_type, metric_type)
+    suffix = SCOPE_SUFFIXES.get(scope, "")
+    return f"{base}{suffix}"
+
+# ===================================================================
+# Expanding PCA Logic (Fixes Lookahead Bias)
+# ===================================================================
+def get_expanding_pca(df, min_periods=30, winsor_limit=0.01):
+    """
+    Calculates the first Principal Component using an expanding window
+    to prevent lookahead bias.
+    """
+    n_samples, n_features = df.shape
+    factors = np.full(n_samples, np.nan)
+    
+    # Store previous component to ensure sign consistency (prevent flipping)
+    prev_component = None
+    
+    # We iterate through the timeline
+    # We need at least 'min_periods' of data to start
+    iter_range = range(min_periods, n_samples + 1)
+    
+    # Optional: Use tqdm if interactive, otherwise standard loop
+    # using simple loop here to keep output clean in logs
+    for t in iter_range:
+        # 1. Expand Window: Get data from start up to current time t
+        window = df.iloc[:t].copy()
+        
+        # 2. Winsorize (Inside the window only)
+        # We must re-winsorize at every step because the quantiles change as data expands
+        for col in window.columns:
+            window[col] = winsorize(window[col].values, limits=[winsor_limit, winsor_limit])
+            
+        # 3. Standardize (Fit on current window)
+        scaler = StandardScaler()
+        window_std = scaler.fit_transform(window)
+        
+        # 4. Fit PCA (On current window)
+        pca = PCA(n_components=1)
+        pca.fit(window_std)
+        current_vec = pca.components_[0]
+        
+        # 5. Handle Sign Flipping
+        # PCA directions are arbitrary. We align the current vector with the previous one.
+        if prev_component is not None:
+            # If dot product is negative, vector flipped 180 deg
+            if np.dot(current_vec, prev_component) < 0:
+                current_vec = -current_vec
+        else:
+            # Initial Check: Force positive correlation with the average of inputs (convention)
+            # This ensures that if the market generally goes up, the factor goes up.
+            if np.sum(current_vec) < 0:
+                current_vec = -current_vec
+
+        prev_component = current_vec
+        
+        # 6. Transform ONLY the current day (the last row)
+        # We project the last row of the standardized data using the corrected vector
+        last_row_scaled = window_std[-1]
+        factors[t-1] = np.dot(last_row_scaled, current_vec)
+
+    return pd.Series(factors, index=df.index)
 
 # ===================================================================
 # Core Copula Granger Causality Functions
@@ -81,7 +153,6 @@ def calcBandwidth(z, d):
     return np.power(max(n, 2), -1.0 / (d + 4.0))
 
 def yCMD(y_next, y_lags, h, query_y_next=None, query_y_lags=None):
-    T, d = y_lags.shape
     if query_y_lags is None: query_y_lags, query_y_next = y_lags, y_next
     W = kernelWeights(query_y_lags, y_lags, h)
     W_sum = W.sum(axis=1, keepdims=True) + 1e-12
@@ -129,17 +200,14 @@ def bootstrapGC(x, y, lag=1, n_boot=200, m_bern=10, h=None, random_state=None):
     valid = (~np.isnan(x)) & (~np.isnan(y)); x, y = x[valid], y[valid]
     n = len(x); T = n - lag
     if n <= lag + 1: return np.full(n_boot, np.nan)
-    
     y_lags = np.column_stack([y[i:n - lag + i] for i in range(lag)])
     x_lags = np.column_stack([x[i:n - lag + i] for i in range(lag)])
     y_next = y[lag:]
     y_lags_std = StandardScaler().fit_transform(y_lags)
     h = calcBandwidth(y_lags_std, y_lags_std.shape[1]) if h is None else float(h)
-    
     W_full = kernelWeights(y_lags_std, y_lags_std, h)
     row_sums = W_full.sum(axis=1, keepdims=True)
     W_probs = W_full / np.where(row_sums == 0, 1.0, row_sums)
-    
     gc_null = np.empty(n_boot, dtype=float)
     for b in tqdm(range(n_boot), desc="Bootstrapping", leave=False):
         idx_next = np.argmax(np.cumsum(W_probs[rng.integers(0, T, size=T)], axis=1) >= rng.random(size=(T, 1)), axis=1)
@@ -152,79 +220,105 @@ def bootstrapGC(x, y, lag=1, n_boot=200, m_bern=10, h=None, random_state=None):
 # Main Execution
 # ===================================================================
 if __name__ == "__main__":
-    print(f"Starting {DIRECTION_NAME} Copula Granger Causality Analysis (Winsorized)...")
+    print(f"Starting {DIRECTION_NAME} Analysis")
+    print(f"Prediction: {INPUT_SCOPE} Metrics -> Daily Metrics (Tomorrow)")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Data
+    print("Loading Data...")
     coin_data = {}
     for file in DATA_DIR.glob("*.csv"):
         if (c := file.stem.replace("Verif_", "")) in ["DAI", "USDC", "USDT", "BNB", "BTC", "ETH", "XRP"]:
             df = pd.read_csv(file, parse_dates=['Date']).sort_values("Date")
             coin_data[c] = df[(df['Date'] >= START_DATE) & (df['Date'] <= END_DATE)].set_index('Date')
 
-    # 2. Create Factors (MODIFIED TO INCLUDE WINSORIZATION)
-    def get_fac(coins, var, name):
-        # Concatenate raw data
-        df_list = [coin_data[c][var] for c in coins if c in coin_data]
-        if not df_list: 
-             print(f"Warning: Missing data for {name}")
-             return pd.Series(dtype=float)
+    # 2. Factor Creation Function (Refactored to use Expanding PCA)
+    def get_fac(coins, metric_type, scope, name):
+        col_name = get_column_name(metric_type, scope)
+        
+        if coins and col_name not in coin_data[coins[0]].columns:
+            print(f"Warning: Column {col_name} not found.")
+            return pd.Series(dtype=float)
+
+        df_list = [coin_data[c][col_name] for c in coins if c in coin_data]
+        if not df_list: return pd.Series(dtype=float)
 
         df = pd.concat(df_list, axis=1, keys=coins, join='inner').dropna()
-        
-        # Winsorize before PCA
-        for col in df.columns:
-            df[col] = winsorize(df[col], limits=[WINSOR_QUANTILE, WINSOR_QUANTILE])
+        if df.empty: return pd.Series(dtype=float)
 
-        # Fit PCA
-        pca = PCA(1).fit(StandardScaler().fit_transform(df))
-        print(f"{name} Exp. Var: {pca.explained_variance_ratio_[0]:.2%}")
+        # Call the new expanding PCA function
+        # This will return a Series with the first ~MIN_PCA_PERIODS as NaN
+        print(f"  Calculating Expanding PCA for {name} ({len(df)} rows)...")
+        factor_series = get_expanding_pca(df, min_periods=MIN_PCA_PERIODS, winsor_limit=WINSOR_QUANTILE)
+        factor_series.name = name
         
-        # Transform and return
-        return pd.Series(pca.transform(StandardScaler().fit_transform(df)).ravel(), index=df.index, name=name)
+        return factor_series
 
-    factors = {
-        "Stable_Volume": get_fac(["DAI", "USDC", "USDT"], "LogVolChange", "PC1_S_Vol"),
-        "Stable_Volatility": get_fac(["DAI", "USDC", "USDT"], STATIONARY_VOL, "PC1_S_Vola"),
-        "Stable_Returns": get_fac(["DAI", "USDC", "USDT"], "Log Returns", "PC1_S_Ret"), # NEW
-        
-        "Crypto_Volume": get_fac(["BNB", "BTC", "ETH", "XRP"], "LogVolChange", "PC1_C_Vol"), # NEW
-        "Crypto_Returns": get_fac(["BNB", "BTC", "ETH", "XRP"], "Log Returns", "PC1_C_Ret"),
-        "Crypto_Volatility": get_fac(["BNB", "BTC", "ETH", "XRP"], STATIONARY_VOL, "PC1_C_Vola")
-    }
+    # 3. Build Factor Dictionary
+    print(f"\nExtracting Factors (Input Scope: {INPUT_SCOPE})...")
+    
+    factors = {}
+    stable_coins = ["DAI", "USDC", "USDT"]
+    crypto_coins = ["BNB", "BTC", "ETH", "XRP"]
+    metrics = ["Volume", "Volatility", "Returns"]
+    
+    for m in metrics:
+        factors[f"Stable_{m}_Input"] = get_fac(stable_coins, m, INPUT_SCOPE, f"Stable_{m}_{INPUT_SCOPE}")
+        factors[f"Crypto_{m}_Input"] = get_fac(crypto_coins, m, INPUT_SCOPE, f"Crypto_{m}_{INPUT_SCOPE}")
+        factors[f"Stable_{m}_Daily"] = get_fac(stable_coins, m, "Day", f"Stable_{m}_Day")
+        factors[f"Crypto_{m}_Daily"] = get_fac(crypto_coins, m, "Day", f"Crypto_{m}_Day")
 
-    # 3. Run Tests
+    # 4. Run Tests
     results, nulls = [], []
-    print("-" * 50)
-    for src, tgt in TESTS_TO_RUN:
-        print(f"Testing: {src} -> {tgt}")
-        if src not in factors or tgt not in factors:
-            print(f"  Skipping: {src} or {tgt} not found in factors.")
+    print("-" * 60)
+    
+    for src_type, tgt_type in TESTS_TO_RUN:
+        src_key = f"{src_type}_Input"
+        tgt_key = f"{tgt_type}_Daily"
+        
+        print(f"Testing: {src_key} -> {tgt_key}")
+        
+        if src_key not in factors or tgt_key not in factors:
+            print(f"  Skipping: Factors missing.")
             continue
             
-        y_ser = factors[tgt]
-        if y_ser.empty: 
-            print(f"  Skipping: Target {tgt} is empty.")
+        x_series = factors[src_key]
+        y_series = factors[tgt_key]
+        
+        # Align Data (This drops the initial NaNs from the expanding window warmup)
+        df = pd.concat([x_series, y_series], axis=1, join='inner').dropna()
+        
+        if df.empty:
+            print("  Skipping: Empty data after alignment.")
             continue
-
-        # Note: We force MAXLAGS here per your previous config
-        opt_lag = MAXLAGS 
-        print(f"  Lag: {opt_lag}")
-
-        df = pd.concat([factors[src], y_ser], axis=1, join='inner').dropna()
+            
         x, y = df.iloc[:, 0].values, df.iloc[:, 1].values
 
-        if len(x) > opt_lag + 1:
-            gc = calcGC(x, y, lag=opt_lag)
+        if len(x) > MAXLAGS + 1:
+            gc = calcGC(x, y, lag=MAXLAGS)
             print("  Bootstrapping...")
-            null_dist = bootstrapGC(x, y, lag=opt_lag, n_boot=N_BOOT, random_state=RANDOM_STATE)
+            null_dist = bootstrapGC(x, y, lag=MAXLAGS, n_boot=N_BOOT, random_state=RANDOM_STATE)
             pval = np.mean(null_dist >= gc)
             print(f"  -> GC: {gc:.4f}, p-val: {pval:.4f}\n")
             
-            results.append({"Source": src, "Target": tgt, "Lag": opt_lag, "GC": gc, "p-value": pval})
-            nulls.append({"Source": src, "Target": tgt, "Nulls": json.dumps(null_dist.tolist())})
+            results.append({
+                "Source": src_type, 
+                "Target": tgt_type, 
+                "InputScope": INPUT_SCOPE,
+                "GC": gc, 
+                "p-value": pval
+            })
+            nulls.append({
+                "Source": src_type, 
+                "Target": tgt_type, 
+                "InputScope": INPUT_SCOPE,
+                "Nulls": json.dumps(null_dist.tolist())
+            })
 
-    # 4. Save
-    pd.DataFrame(results).to_csv(OUTPUT_DIR / f"GC_Results_{DIRECTION_NAME}_{MAXLAGS}.csv", index=False)
-    pd.DataFrame(nulls).to_csv(OUTPUT_DIR / f"GC_Nulls_{DIRECTION_NAME}_{MAXLAGS}.csv", index=False)
-    print(f"Done. Saved to {OUTPUT_DIR}")
+    # 5. Save
+    fname_res = OUTPUT_DIR / f"GC_Results_{DIRECTION_NAME}_{INPUT_SCOPE}.csv"
+    fname_null = OUTPUT_DIR / f"GC_Nulls_{DIRECTION_NAME}_{INPUT_SCOPE}.csv"
+    
+    pd.DataFrame(results).to_csv(fname_res, index=False)
+    pd.DataFrame(nulls).to_csv(fname_null, index=False)
+    print(f"Done. Results saved to:\n  {fname_res}")
