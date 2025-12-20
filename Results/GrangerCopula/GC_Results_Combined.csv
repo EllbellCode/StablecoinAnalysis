@@ -1,0 +1,17 @@
+Source,Target,day significance,week significance,month significance
+Stable_Downside_Vol,Crypto_Downside_Vol,0.0,0.0,0.005
+Stable_Upside_Vol,Crypto_Downside_Vol,0.05,0.0,0.0
+Stable_Volatility,Crypto_Downside_Vol,0.0,0.0,0.0
+Stable_Volume,Crypto_Downside_Vol,0.155,0.065,0.0
+Stable_Downside_Vol,Crypto_Returns,0.0,0.015,0.0
+Stable_Upside_Vol,Crypto_Returns,0.235,0.215,0.115
+Stable_Volatility,Crypto_Returns,0.02,0.04,0.045
+Stable_Volume,Crypto_Returns,0.6,0.13,0.0
+Stable_Downside_Vol,Crypto_Upside_Vol,0.0,0.0,0.01
+Stable_Upside_Vol,Crypto_Upside_Vol,0.0,0.0,0.2
+Stable_Volatility,Crypto_Upside_Vol,0.0,0.075,0.005
+Stable_Volume,Crypto_Upside_Vol,0.74,0.02,0.0
+Stable_Downside_Vol,Crypto_Volatility,0.0,0.0,0.135
+Stable_Upside_Vol,Crypto_Volatility,0.0,0.0,0.0
+Stable_Volatility,Crypto_Volatility,0.0,0.0,0.005
+Stable_Volume,Crypto_Volatility,0.07,0.0,0.0

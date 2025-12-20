@@ -1,3 +1,0 @@
-Target,Source,Model,MA,N,Exceptions,Rate,p_value
-PC1_Crypto_Volatility,None,Benchmark,-,367,2,0.005449591280653951,7.095214341612532e-07
-PC1_Crypto_Volatility,PC1_Stable_Volatility,Copula-GARCH,1,367,2,0.005449591280653951,7.095214341612532e-07

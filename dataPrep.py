@@ -13,7 +13,6 @@ def convertVol(volume_str):
     return float(volume_str)
 
 def standardize(data_dir):
-
     data_dir = Path(data_dir)
     output_dir = data_dir / 'Verified'
     output_dir.mkdir(exist_ok=True)
@@ -22,19 +21,32 @@ def standardize(data_dir):
         print(f"Processing {file.name}")
         df = pd.read_csv(file)
 
-        # Convert date
+        # 1. Standardize Date
         if "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
 
-        # Clean numeric columns
+        # 2. Standardize Column Names (Renaming Vol. to Volume immediately)
+        if 'Vol.' in df.columns:
+            df.rename(columns={'Vol.': 'Volume'}, inplace=True)
+
+        # 3. Clean Numeric Columns (Price)
         for col in ['Close', 'Open', 'High', 'Low']:
             if col in df.columns:
-                df[col] = df[col].astype(str).str.replace(',', '', regex=False).astype(float)
+                # Remove commas
+                df[col] = df[col].astype(str).str.replace(',', '', regex=False)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                # FORCE POSITIVE: Replace <= 0 with NaN
+                df[col] = df[col].where(df[col] > 0, np.nan)
 
-        # Handle Volume
-        if 'Vol.' in df.columns:
-            df['Volume'] = df['Volume'].apply(convertVol)
-            df['Volume'] = df['Volume'].fillna(999_999_999_999).round()
+        # 4. Clean Volume (Now runs for ALL files)
+        if 'Volume' in df.columns:
+            # Handle 'K', 'M', 'B' suffixes if they exist
+            if df['Volume'].dtype == object:
+                df['Volume'] = df['Volume'].apply(convertVol)
+            
+            # FORCE POSITIVE: Replace <= 0 with NaN
+            df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
+            df['Volume'] = df['Volume'].where(df['Volume'] > 0, np.nan)
 
         # Save
         out_path = output_dir / f"Verif_{file.name}"
@@ -78,110 +90,182 @@ def interpolate(missing_dict, data_dir):
         df.to_csv(path, index=False)
 
 def calcReturns(data_dir):
-
     data_dir = Path(data_dir)
 
     for file in data_dir.glob("*.csv"):
-
         df = pd.read_csv(file)
+        
+        # 1. Force Standard Sort Order (Ascending: Oldest -> Newest)
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.sort_values("Date", ascending=True, inplace=True)
 
         if 'Close' in df.columns:
+            # 2. Use pct_change() for robust (Today / Yesterday) - 1
+            df['Returns'] = df['Close'].pct_change()
             
-            #Backwards order as we sort the date at the end!
-            df['Returns'] = df['Close'] / df['Close'].shift(-1) - 1
-            df['Log Returns'] = np.log(df['Close'] / df['Close'].shift(-1))
+            # 3. Log Returns: ln(Today / Yesterday)
+            df['Log Returns'] = np.log(df['Close'] / df['Close'].shift(1))
+            
             df.to_csv(file, index=False)
+            print(f"Returns calculated for {file.name}")
 
 def volNorm(data_dir):
-
     data_dir = Path(data_dir)
 
     for file in data_dir.glob("*.csv"):
-
         df = pd.read_csv(file)
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.sort_values("Date", ascending=True, inplace=True)
 
-        df['VolChange'] = df['Volume'] / df['Volume'].shift(-1) - 1
-        df['LogVolChange'] = np.log(df['Volume'] / df['Volume'].shift(-1))
+        # Volume Change
+        # FIX: Explicitly set fill_method to None to silence the warning
+        df['VolChange'] = df['Volume'].pct_change(fill_method=None)
+        
+        # Log Change: Protect against 0 and Negatives
+        safe_vol = df['Volume'].where(df['Volume'] > 0, np.nan)
+        vol_ratio = safe_vol / safe_vol.shift(1)
+        df['LogVolChange'] = np.log(vol_ratio.where(vol_ratio > 0, np.nan))
 
-        df = df.sort_values("Date", ascending=True)
         df.to_csv(file, index=False)
+        print(f"Volume normalized for {file.name}")
 
 def addVolatility(data_dir):
+    """
+    Calculates Garman-Klass, Rogers-Satchell (Split & Total), and Yang-Zhang volatilities.
+    Args:
+        data_dir: Path to directory containing CSVs.
+        window: Rolling window size for Yang-Zhang (default 30 days).
+    """
     data_dir = Path(data_dir)
 
     for file in data_dir.glob("*.csv"):
         df = pd.read_csv(file)
-
-        # 1. Calculate Garman-Klass Volatility
-        # Note: We use clip(lower=0) inside sqrt to handle potential tiny floating point errors returning negative zeros
-        term1 = 0.5 * (np.log(df['High'] / df['Low']) ** 2)
-        term2 = (2 * np.log(2) - 1) * (np.log(df['Close'] / df['Open']) ** 2)
         
-        df['GarmanKlass'] = np.sqrt((term1 - term2).clip(lower=0))
+        # 1. Standardize and Sort
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.sort_values("Date", ascending=True, inplace=True)
 
-        # 2. Safe Log Calculation
-        # Replace 0 with NaN (or a small epsilon like 1e-9) before logging to avoid -inf
-        df['LogGarmanKlass'] = np.log(df['GarmanKlass'].replace(0, np.nan))
-        df['Delta_LogGK'] = df['LogGarmanKlass'].diff()
+        # 2. Log Prices (Base for all calculations)
+        # We replace <=0 with NaN to avoid -inf errors in logs
+        o = df['Open'].where(df['Open'] > 0, np.nan)
+        h = df['High'].where(df['High'] > 0, np.nan)
+        l = df['Low'].where(df['Low'] > 0, np.nan)
+        c = df['Close'].where(df['Close'] > 0, np.nan)
 
+        log_o = np.log(o)
+        log_h = np.log(h)
+        log_l = np.log(l)
+        log_c = np.log(c)
+        
+        # -------------------------------------------------------
+        # A. GARMAN-KLASS (Standard)
+        # -------------------------------------------------------
+        # 0.5 * (ln(H/L)^2) - (2ln2 - 1) * (ln(C/O)^2)
+        gk_term1 = 0.5 * ((log_h - log_l) ** 2)
+        gk_term2 = (2 * np.log(2) - 1) * ((log_c - log_o) ** 2)
+        
+        df['GarmanKlass'] = np.sqrt((gk_term1 - gk_term2).clip(lower=0))
+        
+        # Log-Diff (Stationary metric for Granger)
+        df['Delta_LogGK'] = np.log(df['GarmanKlass'].replace(0, np.nan)).diff()
 
-        df = df.sort_values("Date", ascending=True)
+        # -------------------------------------------------------
+        # B. ROGERS-SATCHELL (Decomposed & Total)
+        # -------------------------------------------------------
+        # RS uses Daily estimators, so no rolling window needed for the base calculation.
+        
+        # 1. Upside Variance Term: (High - Close) * (High - Open)
+        # Measures turbulence contributed by upward extensions
+        rs_upside_var = (log_h - log_c) * (log_h - log_o)
+        
+        # 2. Downside Variance Term: (Low - Close) * (Low - Open)
+        # Measures turbulence contributed by downward extensions
+        rs_downside_var = (log_l - log_c) * (log_l - log_o)
+        
+        # 3. Total RS Variance (Standard Textbook Formula)
+        rs_total_var = rs_upside_var + rs_downside_var
+
+        # 4. Save Metrics
+        # Note: We take sqrt to convert Variance -> Volatility
+        df['RS'] = np.sqrt(rs_total_var.clip(lower=0)).diff()
+        
+        # Split Volatilities (Drift Independent Upside/Downside)
+        # We use .diff() here to make them stationary for your Granger test immediately
+        df['Upside_Vol'] = np.sqrt(rs_upside_var.clip(lower=0)).diff()
+        df['Downside_Vol'] = np.sqrt(rs_downside_var.clip(lower=0)).diff()
+
+        
         df.to_csv(file, index=False)
 
 def addRollingMetrics(data_dir):
-    """
-    Calculates rolling Weekly (7-day) and Monthly (30-day) candle metrics.
-    Adds: Log Returns, Log Volume Change, and Delta Log Garman-Klass for these rolling windows.
-    """
     data_dir = Path(data_dir)
-    
-    # Define windows: Name -> Days
-    windows = {
-        'Weekly': 7,
-        'Monthly': 30
-    }
+    windows = {'Weekly': 7, 'Monthly': 30}
     
     for file in data_dir.glob("*.csv"):
         df = pd.read_csv(file)
-        
-        # Ensure data is sorted by Date (Ascending) for rolling calculations to look BACKWARDS correctly
         if 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date'])
             df.sort_values('Date', ascending=True, inplace=True)
         
         for suffix, window in windows.items():
-            # --- 1. Construct the Rolling Candle ---
-            # Open: The Open price of the start of the window (window-1 days ago)
-            roll_open = df['Open'].shift(window - 1)
-            # Close: Today's Close
-            roll_close = df['Close']
-            # High: Max High over the window
-            roll_high = df['High'].rolling(window=window).max()
-            # Low: Min Low over the window
-            roll_low = df['Low'].rolling(window=window).min()
-            # Volume: Sum of Volume over the window
+            # 1. Construct the "Big Candle" (Rolling Window)
+            roll_open = df['Open'].shift(window - 1)  # Open of the first day in window
+            roll_close = df['Close']                  # Close of the last day in window
+            roll_high = df['High'].rolling(window=window).max() # Highest High in window
+            roll_low = df['Low'].rolling(window=window).min()   # Lowest Low in window
             roll_vol = df['Volume'].rolling(window=window).sum()
+
+            # 2. Safe Logarithms (Replace <=0 with NaN)
+            log_o = np.log(roll_open.where(roll_open > 0, np.nan))
+            log_c = np.log(roll_close.where(roll_close > 0, np.nan))
+            log_h = np.log(roll_high.where(roll_high > 0, np.nan))
+            log_l = np.log(roll_low.where(roll_low > 0, np.nan))
             
-            # --- 2. Calculate Metrics on the Rolling Candle ---
+            # 3. Rogers-Satchell on the Rolling Candle
+            # Upside Term: (High - Close) * (High - Open)
+            rs_upside_var = (log_h - log_c) * (log_h - log_o)
             
-            # A. Log Returns (Candle Return)
-            # ln(Close / Open) for the aggregated period
-            df[f'Log Returns_{suffix}'] = np.log(roll_close / roll_open)
+            # Downside Term: (Low - Close) * (Low - Open)
+            rs_downside_var = (log_l - log_c) * (log_l - log_o)
             
-            # B. Log Volume Change
-            # Change in the rolling volume sum: ln(CurrentRollingVol / PrevRollingVol) -> ln(Vol).diff()
-            df[f'LogVolChange_{suffix}'] = np.log(roll_vol.replace(0, np.nan)).diff()
+            # Total Variance
+            rs_total_var = rs_upside_var + rs_downside_var
             
-            # C. Delta Log Garman-Klass
-            # Calculate GK on the rolling High/Low/Open/Close
-            term1 = 0.5 * (np.log(roll_high / roll_low) ** 2)
-            term2 = (2 * np.log(2) - 1) * (np.log(roll_close / roll_open) ** 2)
+            # 4. Save & Make Stationary (Diff)
+            # We take Sqrt to get Volatility units, then Diff for stationarity
+            
+            # Split Metrics
+            df[f'Upside_Vol_{suffix}'] = np.sqrt(rs_upside_var.clip(lower=0)).diff()
+            df[f'Downside_Vol_{suffix}'] = np.sqrt(rs_downside_var.clip(lower=0)).diff()
+            
+            # Total Rogers-Satchell (Full Metric)
+            df[f'RS_{suffix}'] = np.sqrt(rs_total_var.clip(lower=0)).diff()
+
+            # -----------------------------------------------------------
+            # Other Rolling Metrics
+            # -----------------------------------------------------------
+            
+            # Log Returns (Over the full window)
+            # Measures "Weekly Return" (Close_t vs Close_{t-7})
+            price_ratio = df['Close'] / df['Close'].shift(window)
+            df[f'Log Returns_{suffix}'] = np.log(price_ratio.where(price_ratio > 0, np.nan))
+            
+            # Log Volume Change (Change in Total Volume)
+            safe_vol = roll_vol.where(roll_vol > 0, np.nan)
+            df[f'LogVolChange_{suffix}'] = np.log(safe_vol / safe_vol.shift(1))
+            
+            # Rolling Garman-Klass (as a reference/backup)
+            high_low_ratio = (roll_high / roll_low).where((roll_high > 0) & (roll_low > 0), np.nan)
+            close_open_ratio = (roll_close / roll_open).where((roll_close > 0) & (roll_open > 0), np.nan)
+            term1 = 0.5 * (np.log(high_low_ratio) ** 2)
+            term2 = (2 * np.log(2) - 1) * (np.log(close_open_ratio) ** 2)
             gk_vol = np.sqrt((term1 - term2).clip(lower=0))
             
-            # Log and Diff for stationarity
-            df[f'Delta_LogGK_{suffix}'] = np.log(gk_vol.replace(0, np.nan)).diff()
+            df[f'Delta_LogGK_{suffix}'] = np.log(gk_vol.where(gk_vol > 0, np.nan)).diff()
             
         df.to_csv(file, index=False)
+        print(f"Rolling metrics for {file.name}")
 
 def main():
 
@@ -211,8 +295,6 @@ def main():
     calcReturns(verif_folder)
     volNorm(verif_folder)
     addVolatility(verif_folder)
-    
-    # NEW STEP: Add Rolling Weekly/Monthly Metrics
     addRollingMetrics(verif_folder)
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ def run_adf_test(series, autolag='AIC'):
 Main test
 """
 data_dir = Path("Data/Verified")
+output_dir = "Results/ADF/"
 files = list(data_dir.glob("*.csv"))
 
 stablecoins = ['DAI', 'USDC', 'USDT']
@@ -44,12 +45,38 @@ cryptos = ['BNB', 'BTC', 'ETH', 'XRP']
 tests_to_run = (
     
     [(coin, 'LogVolChange') for coin in stablecoins] +
-    [(coin, 'Delta_LogGK') for coin in stablecoins] +
+    [(coin, 'LogVolChange_Weekly') for coin in stablecoins] +
+    [(coin, 'LogVolChange_Monthly') for coin in stablecoins] +
+    #[(coin, 'Delta_LogGK') for coin in stablecoins] +
+    [(coin, 'RS') for coin in stablecoins] +
+    [(coin, 'RS_Weekly') for coin in stablecoins] +
+    [(coin, 'RS_Monthly') for coin in stablecoins] +
     [(coin, 'Log Returns') for coin in stablecoins] +
-    
+    [(coin, 'Log Returns_Weekly') for coin in stablecoins] +
+    [(coin, 'Log Returns_Monthly') for coin in stablecoins] +
+    [(coin, 'Upside_Vol') for coin in stablecoins] +
+    [(coin, 'Upside_Vol_Weekly') for coin in stablecoins] +
+    [(coin, 'Upside_Vol_Monthly') for coin in stablecoins] +
+    [(coin, 'Downside_Vol') for coin in stablecoins] +
+    [(coin, 'Downside_Vol_Weekly') for coin in stablecoins] +
+    [(coin, 'Downside_Vol_Monthly') for coin in stablecoins] +
+
     [(coin, 'LogVolChange') for coin in cryptos] +
+    [(coin, 'LogVolChange_Weekly') for coin in cryptos] +
+    [(coin, 'LogVolChange_Monthly') for coin in cryptos] +
+    #[(coin, 'Delta_LogGK') for coin in stablecoins] +
+    [(coin, 'RS') for coin in cryptos] +
+    [(coin, 'RS_Weekly') for coin in cryptos] +
+    [(coin, 'RS_Monthly') for coin in cryptos] +
     [(coin, 'Log Returns') for coin in cryptos] +
-    [(coin, 'Delta_LogGK') for coin in cryptos]
+    [(coin, 'Log Returns_Weekly') for coin in cryptos] +
+    [(coin, 'Log Returns_Monthly') for coin in cryptos] +
+    [(coin, 'Upside_Vol') for coin in cryptos] +
+    [(coin, 'Upside_Vol_Weekly') for coin in cryptos] +
+    [(coin, 'Upside_Vol_Monthly') for coin in cryptos] +
+    [(coin, 'Downside_Vol') for coin in cryptos] +
+    [(coin, 'Downside_Vol_Weekly') for coin in cryptos] +
+    [(coin, 'Downside_Vol_Monthly') for coin in cryptos] 
 )
 
 coin_data = {}
@@ -85,4 +112,4 @@ results_df = results_df[['Coin', 'Variable', 'ADF Statistic', 'p-value', 'Number
 print("\n--- ADF Test Results ---")
 print(results_df.to_string())
 
-results_df.to_csv("adf_results.csv", index=False)
+results_df.to_csv(output_dir + "adf_results.csv", index=False)

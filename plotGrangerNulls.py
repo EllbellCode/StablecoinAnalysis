@@ -7,8 +7,8 @@ from pathlib import Path
 import re 
 
 # --- 1. Setup ---
-input_dir = Path("Results/GrangerCopula")
-output_dir = Path("Plots/GrangerCopula")
+input_dir = Path("Results/GrangerCopula/RS")
+output_dir = Path("Plots/GrangerCopula/")
 output_dir.mkdir(parents=True, exist_ok=True) 
 
 # Find all NULLS files

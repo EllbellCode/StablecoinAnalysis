@@ -11,7 +11,7 @@ def categorize_result(row):
     Determines if the result is a Significant Win, Loss, or Neutral
     based on P-Value and MSE comparison.
     """
-    if row['DM_P_Value'] < SIGNIFICANCE_THRESHOLD:
+    if row['DM_MSE_P_Value'] < SIGNIFICANCE_THRESHOLD:
         if row['MSE_Challenger'] < row['MSE_Benchmark']:
             return "✅ SIGNIFICANT WIN"
         else:
@@ -71,11 +71,13 @@ def main():
     # 4. Reorder Columns for Readability
     # Putting Key Metrics up front
     cols = [
-        'Test', 'Source', 'Target', 'Conclusion', 
-        'MSE_Reduction_Pct', 'Dir_Acc_pct',
-        'DM_P_Value', 'DM_Stat', 'OOS_Days', 
-        'MSE_Benchmark', 'MSE_Challenger', 
-        'Benchmark_Directional_Acc', 'Challenger_Directional_Acc'
+        'Test', 'Source', 'Target', 'OOS_Days', 'Conclusion',
+        'MSE_Reduction_Pct', #'Dir_Acc_pct',
+        'DM_MSE_P_Value', #'DM_Stat', 
+        #'MSE_Benchmark', 'MSE_Challenger',
+        'Dir_Acc_pct',
+        #'Benchmark_Directional_Acc', 'Challenger_Directional_Acc',
+        'DM_Directional_P_Value'
     ]
     
     # Ensure all cols exist

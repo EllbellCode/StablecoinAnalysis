@@ -14,8 +14,6 @@ warnings.filterwarnings('ignore')
 # Script to Test Copula Granger Causality on Daily/Weekly/Monthly Horizons
 # "Does todays/the last week/the last month have causality for tomorrow?"
 # Use an expanding window PCA to prevent data leakage
-# Winsorise at 0.01 and 0.99 quantiles to mitigate effects of black swan events
-#  Using a single copula for the 4 year period. Could fit every year to see how the dependence changes over time?
 
 # ===================================================================
 # USER CONFIGURATION
@@ -33,18 +31,34 @@ RUN_FORWARD_TEST = True
 if RUN_FORWARD_TEST:
     DIRECTION_NAME = "StableCrypto"
     TESTS_TO_RUN = [
+        # Original Tests
         ("Stable_Volume", "Crypto_Volatility"),
-        ("Stable_Volatility", "Crypto_Volatility"),
         ("Stable_Volume", "Crypto_Returns"),
+        ("Stable_Volume", "Crypto_Upside_Vol"),
+        ("Stable_Volume", "Crypto_Downside_Vol"),
+
         ("Stable_Volatility", "Crypto_Returns"),
+        ("Stable_Volatility", "Crypto_Volatility"),
+        ("Stable_Volatility", "Crypto_Upside_Vol"),
+        ("Stable_Volatility", "Crypto_Downside_Vol"),
+        
+        ("Stable_Upside_Vol", "Crypto_Returns"),
+        ("Stable_Upside_Vol", "Crypto_Volatility"),
+        ("Stable_Upside_Vol", "Crypto_Downside_Vol"),
+        ("Stable_Upside_Vol", "Crypto_Upside_Vol"),
+
+        ("Stable_Downside_Vol", "Crypto_Upside_Vol"),
+        ("Stable_Downside_Vol", "Crypto_Downside_Vol"),
+        ("Stable_Downside_Vol", "Crypto_Volatility"),
+        ("Stable_Downside_Vol", "Crypto_Returns"),
     ]
 else:
     DIRECTION_NAME = "CryptoStable"
     TESTS_TO_RUN = [
         ("Crypto_Returns", "Stable_Volume"),
         ("Crypto_Returns", "Stable_Volatility"),
-        ("Crypto_Volatility", "Stable_Volume"),
-        ("Crypto_Volatility", "Stable_Volatility"),
+        ("Crypto_Upside_Vol", "Stable_Downside_Vol"), 
+        ("Crypto_Downside_Vol", "Stable_Upside_Vol"),
     ]
 
 # 3. SETTINGS
@@ -56,7 +70,7 @@ N_BOOT = 200
 WINSOR_QUANTILE = 0.01
 RANDOM_STATE = 123
 MAXLAGS = 1
-MIN_PCA_PERIODS = 30  #Minimum days required to fit the first PCA
+MIN_PCA_PERIODS = 30 
 
 # ===================================================================
 # Data Loading & Processing
@@ -68,10 +82,14 @@ SCOPE_SUFFIXES = {
     "Month": "_Monthly"
 }
 
+# --- MODIFIED: Added Mappings for New Upside/Downside Columns ---
 VAR_MAP = {
     "Volume": "LogVolChange",
-    "Volatility": "Delta_LogGK",
-    "Returns": "Log Returns"
+    #"Volatility": "Delta_LogGK",
+    "Volatility" : "RS",
+    "Returns": "Log Returns",
+    "Upside_Vol": "Upside_Vol",     
+    "Downside_Vol": "Downside_Vol"
 }
 
 def get_column_name(metric_type, scope):
@@ -89,50 +107,30 @@ def get_expanding_pca(df, min_periods=30, winsor_limit=0.01):
     """
     n_samples, n_features = df.shape
     factors = np.full(n_samples, np.nan)
-    
-    # Store previous component to ensure sign consistency (prevent flipping)
     prev_component = None
     
-    # We iterate through the timeline
-    # We need at least 'min_periods' of data to start
     iter_range = range(min_periods, n_samples + 1)
     
-    # Optional: Use tqdm if interactive, otherwise standard loop
-    # using simple loop here to keep output clean in logs
     for t in iter_range:
-        # 1. Expand Window: Get data from start up to current time t
         window = df.iloc[:t].copy()
-        
-        # 2. Winsorize (Inside the window only)
-        # We must re-winsorize at every step because the quantiles change as data expands
         for col in window.columns:
             window[col] = winsorize(window[col].values, limits=[winsor_limit, winsor_limit])
             
-        # 3. Standardize (Fit on current window)
         scaler = StandardScaler()
         window_std = scaler.fit_transform(window)
         
-        # 4. Fit PCA (On current window)
         pca = PCA(n_components=1)
         pca.fit(window_std)
         current_vec = pca.components_[0]
         
-        # 5. Handle Sign Flipping
-        # PCA directions are arbitrary. We align the current vector with the previous one.
         if prev_component is not None:
-            # If dot product is negative, vector flipped 180 deg
             if np.dot(current_vec, prev_component) < 0:
                 current_vec = -current_vec
         else:
-            # Initial Check: Force positive correlation with the average of inputs (convention)
-            # This ensures that if the market generally goes up, the factor goes up.
             if np.sum(current_vec) < 0:
                 current_vec = -current_vec
 
         prev_component = current_vec
-        
-        # 6. Transform ONLY the current day (the last row)
-        # We project the last row of the standardized data using the corrected vector
         last_row_scaled = window_std[-1]
         factors[t-1] = np.dot(last_row_scaled, current_vec)
 
@@ -232,26 +230,19 @@ if __name__ == "__main__":
             df = pd.read_csv(file, parse_dates=['Date']).sort_values("Date")
             coin_data[c] = df[(df['Date'] >= START_DATE) & (df['Date'] <= END_DATE)].set_index('Date')
 
-    # 2. Factor Creation Function (Refactored to use Expanding PCA)
+    # 2. Factor Creation
     def get_fac(coins, metric_type, scope, name):
         col_name = get_column_name(metric_type, scope)
-        
         if coins and col_name not in coin_data[coins[0]].columns:
             print(f"Warning: Column {col_name} not found.")
             return pd.Series(dtype=float)
-
         df_list = [coin_data[c][col_name] for c in coins if c in coin_data]
         if not df_list: return pd.Series(dtype=float)
-
         df = pd.concat(df_list, axis=1, keys=coins, join='inner').dropna()
         if df.empty: return pd.Series(dtype=float)
-
-        # Call the new expanding PCA function
-        # This will return a Series with the first ~MIN_PCA_PERIODS as NaN
         print(f"  Calculating Expanding PCA for {name} ({len(df)} rows)...")
         factor_series = get_expanding_pca(df, min_periods=MIN_PCA_PERIODS, winsor_limit=WINSOR_QUANTILE)
         factor_series.name = name
-        
         return factor_series
 
     # 3. Build Factor Dictionary
@@ -260,13 +251,24 @@ if __name__ == "__main__":
     factors = {}
     stable_coins = ["DAI", "USDC", "USDT"]
     crypto_coins = ["BNB", "BTC", "ETH", "XRP"]
-    metrics = ["Volume", "Volatility", "Returns"]
+    
+    # --- MODIFIED: Added Upside_Vol and Downside_Vol to metrics list ---
+    metrics = ["Volume", "Volatility", "Returns", "Upside_Vol", "Downside_Vol"]
     
     for m in metrics:
+        # 1. Always calculate the Input (Predictor)
         factors[f"Stable_{m}_Input"] = get_fac(stable_coins, m, INPUT_SCOPE, f"Stable_{m}_{INPUT_SCOPE}")
         factors[f"Crypto_{m}_Input"] = get_fac(crypto_coins, m, INPUT_SCOPE, f"Crypto_{m}_{INPUT_SCOPE}")
-        factors[f"Stable_{m}_Daily"] = get_fac(stable_coins, m, "Day", f"Stable_{m}_Day")
-        factors[f"Crypto_{m}_Daily"] = get_fac(crypto_coins, m, "Day", f"Crypto_{m}_Day")
+
+        # 2. Handle the Daily (Target)
+        if INPUT_SCOPE == "Day":
+            # OPTIMIZATION: If Input is already 'Day', just point to the existing data
+            factors[f"Stable_{m}_Daily"] = factors[f"Stable_{m}_Input"]
+            factors[f"Crypto_{m}_Daily"] = factors[f"Crypto_{m}_Input"]
+        else:
+            # Otherwise, we need to calculate 'Day' separately (e.g., if Input was 'Week')
+            factors[f"Stable_{m}_Daily"] = get_fac(stable_coins, m, "Day", f"Stable_{m}_Day")
+            factors[f"Crypto_{m}_Daily"] = get_fac(crypto_coins, m, "Day", f"Crypto_{m}_Day")
 
     # 4. Run Tests
     results, nulls = [], []
@@ -285,9 +287,7 @@ if __name__ == "__main__":
         x_series = factors[src_key]
         y_series = factors[tgt_key]
         
-        # Align Data (This drops the initial NaNs from the expanding window warmup)
         df = pd.concat([x_series, y_series], axis=1, join='inner').dropna()
-        
         if df.empty:
             print("  Skipping: Empty data after alignment.")
             continue
@@ -315,7 +315,6 @@ if __name__ == "__main__":
                 "Nulls": json.dumps(null_dist.tolist())
             })
 
-    # 5. Save
     fname_res = OUTPUT_DIR / f"GC_Results_{DIRECTION_NAME}_{INPUT_SCOPE}.csv"
     fname_null = OUTPUT_DIR / f"GC_Nulls_{DIRECTION_NAME}_{INPUT_SCOPE}.csv"
     

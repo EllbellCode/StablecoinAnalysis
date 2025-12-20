@@ -1,3 +1,0 @@
-Source_Factor,Target_Factor,OOS_Days,Expected_Breach_%,Benchmark_Breach_%,Benchmark_Kupiec_p,Copula_Breach_%,Copula_Kupiec_p
-Stable_Volatility,Crypto_Returns,366,1.0,0.0,,0.819672131147541,0.7204140794278007
-Stable_Volatility,Crypto_Volatility,366,1.0,0.273224043715847,0.09758632615489882,0.819672131147541,0.7204140794278007
