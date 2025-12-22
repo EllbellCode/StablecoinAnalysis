@@ -20,7 +20,7 @@ RESULTS_DIR = Path("Results/PCA")
 
 START_DATE = '2020-01-01'
 TRAIN_END_DATE = '2024-01-01' 
-STATIONARY_VOL = "Delta_LogGK"
+STATIONARY_VOL = "RS"
 
 STABLECOINS = ["DAI", "USDC", "USDT"]
 CRYPTOS = ["BNB", "BTC", "ETH", "XRP"]
@@ -244,10 +244,12 @@ if __name__ == "__main__":
     analysis_groups = [
         ("Stablecoins: Volume", STABLECOINS, "LogVolChange"),
         ("Stablecoins: Volatility", STABLECOINS, STATIONARY_VOL),
-        ("Stablecoins: Returns", STABLECOINS, "Log Returns"),
+        ("Stablecoins: Upside", STABLECOINS, "Upside_Vol"),
+        ("Stablecoins: Downside", STABLECOINS, "Downside_Vol"),
         ("Cryptos: Returns", CRYPTOS, "Log Returns"),
         ("Cryptos: Volatility", CRYPTOS, STATIONARY_VOL),
-        ("Cryptos: Volume", CRYPTOS, "LogVolChange")
+        ("Cryptos: Upside", CRYPTOS, "Upside_Vol"),
+        ("Cryptos: Downside", CRYPTOS, "Downside_Vol")
     ]
 
     print("\nStarting PCA Analysis (Training Data Only)...\n")

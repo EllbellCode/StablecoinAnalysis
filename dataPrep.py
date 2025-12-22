@@ -62,33 +62,29 @@ def checkMissing(df, start, end):
     return sorted(set(expected_dates) - set(actual_dates))
 
 def interpolate(missing_dict, data_dir):
+    """
+    FIXED: Uses Forward Fill to prevent look-ahead bias.
+    """
     data_dir = Path(data_dir)
 
     for file_name, missing_dates in missing_dict.items():
         path = data_dir / file_name
         df = pd.read_csv(path)
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.set_index('Date').sort_index()
 
-        for miss_date in missing_dates:
-            miss_dt = pd.to_datetime(miss_date)
-            before = df[df['Date'] == miss_dt - pd.Timedelta(days=1)]
-            after = df[df['Date'] == miss_dt + pd.Timedelta(days=1)]
+        # Reindex to insert missing dates as NaNs
+        full_range = pd.date_range(start=df.index.min(), end=df.index.max())
+        df = df.reindex(full_range)
 
-            if not before.empty and not after.empty:
-                new_row = {
-                    'Date': miss_dt,
-                    'Close': (before['Close'].values[0] + after['Close'].values[0]) / 2,
-                    'Open': (before['Open'].values[0] + after['Open'].values[0]) / 2,
-                    'High': (before['High'].values[0] + after['High'].values[0]) / 2,
-                    'Low': (before['Low'].values[0] + after['Low'].values[0]) / 2,
-                    'Volume': (before['Volume'].values[0] + after['Volume'].values[0]) / 2
-                }
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                print(f"Interpolated: {miss_date} in {file_name}")
+        # Forward Fill ONLY (No look-ahead)
+        df = df.ffill(limit=5)
 
-        df.sort_values("Date", inplace=True)
+        # Reset index
+        df = df.reset_index().rename(columns={'index': 'Date'})
         df.to_csv(path, index=False)
-
+        print(f"Interpolated (Forward Fill) complete for {file_name}")
+        
 def calcReturns(data_dir):
     data_dir = Path(data_dir)
 
@@ -134,7 +130,6 @@ def addVolatility(data_dir):
     Calculates Garman-Klass, Rogers-Satchell (Split & Total), and Yang-Zhang volatilities.
     Args:
         data_dir: Path to directory containing CSVs.
-        window: Rolling window size for Yang-Zhang (default 30 days).
     """
     data_dir = Path(data_dir)
 

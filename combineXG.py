@@ -83,6 +83,7 @@ def main():
     # Ensure all cols exist
     existing_cols = [c for c in cols if c in combined_df.columns]
     combined_df = combined_df[existing_cols]
+    combined_df = combined_df[combined_df['Test'] == 'GARCH']
 
     # 5. Sort: Significant Wins first, then by highest MSE Reduction
     combined_df.sort_values(
