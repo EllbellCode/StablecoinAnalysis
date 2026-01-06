@@ -1,3 +1,8 @@
+"""
+Script for performing the Volatility Targeting Backtest using the GARCH-Copula-XGBoost framework
+
+"""
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -14,18 +19,16 @@ import matplotlib.patches as mpatches
 
 warnings.filterwarnings('ignore')
 
-# ==============================================================================
-# 1. CONFIGURATION
-# ==============================================================================
+# Config
 
 DATA_DIR = Path("Data/Verified")
-RESULTS_DIR = Path("Results/Thesis_Chapter_5") 
+RESULTS_DIR = Path("Results/VolTargeting")
+PLOT_DIR = Path("Plots/VolTargeting") 
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 CRYPTOS = ["BTC", "ETH", "BNB", "XRP"]
 STABLES = ["USDT", "USDC", "DAI"]
 
-# Factors
 FACTOR_CONFIG = {
     'Crypto_Up':   (CRYPTOS, 'Upside_Vol'),
     'Crypto_Down': (CRYPTOS, 'Downside_Vol'),
@@ -38,7 +41,6 @@ START_DATE = '2020-01-01'
 TRAIN_END_DATE = '2024-01-01'
 FULL_END_DATE = '2025-01-01'
 
-# Trading Params
 VOL_TARGETS = [0.20, 0.30, 0.40, 0.50] 
 
 TRADING_DAYS = 366
@@ -52,7 +54,6 @@ ERROR_DIST = 'skewt'
 SEED = 123
 Z_SCORE_WINDOW = 60
 
-# XGBoost Params for Grid Search
 PARAM_GRID = {
     'n_estimators': [50, 100],                
     'learning_rate': [0.05, 0.1],             
@@ -63,37 +64,47 @@ PARAM_GRID = {
     'reg_lambda': [0.5, 1.5]                  
 }
 
-# ==============================================================================
-# 2. HELPER FUNCTIONS
-# ==============================================================================
 
 def get_data_dict():
+
     data_dict = {}
+
     for file in DATA_DIR.glob("*.csv"):
+
         coin = file.stem.replace("Verif_", "") 
+
         df = pd.read_csv(file)
+
         if 'Date' in df.columns:
+
             df['Date'] = pd.to_datetime(df['Date'])
             df.set_index('Date', inplace=True)
             df.sort_index(inplace=True)
             data_dict[coin] = df
+
     print(f"Loaded {len(data_dict)} assets: {list(data_dict.keys())}")
+
     return data_dict
 
 def calculate_pca_for_window(coins, var, data_dict, current_end_date):
+
     current_date = pd.to_datetime(current_end_date)
     yesterday = current_date - pd.Timedelta(days=1)
+
     train_start = pd.to_datetime(START_DATE)
     
     df_list = [data_dict[c][var] for c in coins if c in data_dict and var in data_dict[c].columns]
-    if not df_list: return pd.Series(dtype=float), None, None
+
+    if not df_list: 
+        return pd.Series(dtype=float), None, None
     
     raw_df = pd.concat(df_list, axis=1, keys=coins).dropna()
     
     train_data = raw_df.loc[train_start:yesterday]
     test_data = raw_df.loc[[current_date]] if current_date in raw_df.index else pd.DataFrame()
     
-    if train_data.empty: return pd.Series(dtype=float), None, None
+    if train_data.empty: 
+        return pd.Series(dtype=float), None, None
 
     lower = train_data.quantile(WIN_LIMITS[0])
     upper = train_data.quantile(1 - WIN_LIMITS[1])
@@ -107,9 +118,14 @@ def calculate_pca_for_window(coins, var, data_dict, current_end_date):
     
     flipped = False
     if 'BTC' in coins:
-        if pca.components_[0][coins.index('BTC')] < 0: flipped = True
+
+        if pca.components_[0][coins.index('BTC')] < 0: 
+            flipped = True
+
     elif 'USDT' in coins:
-        if pca.components_[0][coins.index('USDT')] < 0: flipped = True
+        if pca.components_[0][coins.index('USDT')] < 0: 
+            flipped = True
+
     elif np.sum(pca.components_[0]) < 0:
         flipped = True
 
@@ -123,6 +139,7 @@ def calculate_pca_for_window(coins, var, data_dict, current_end_date):
         test_data = test_data.clip(lower=lower, upper=upper, axis=1)
         test_scaled = scaler.transform(test_data)
         test_factor = np.dot(test_scaled, pca.components_.T) 
+
     else:
         test_factor = np.array([])
 
@@ -135,8 +152,10 @@ def calculate_pca_for_window(coins, var, data_dict, current_end_date):
     return series, stats, loadings
 
 def select_best_arma(series, max_order=MAX_LAGS):
+
     best_aic = np.inf
     best_order = (0, 0)
+
     for p in range(max_order + 1):
         for q in range(max_order + 1):
             if p == 0 and q == 0: continue
@@ -169,10 +188,14 @@ def get_volatility(garch_res):
     return garch_res.conditional_volatility
 
 def transform_to_uniform(garch_res):
+
     std_resid = garch_res.std_resid
+
     dist = garch_res.model.distribution
     dist_params = [garch_res.params[p] for p in dist.parameter_names()]
+
     uniform_resid = dist.cdf(std_resid, dist_params)
+
     return pd.Series(uniform_resid, index=std_resid.index)
 
 def get_forecast_mean(garch_res):
@@ -182,11 +205,7 @@ def get_forecast_vol(garch_res):
     return np.sqrt(garch_res.forecast(horizon=1).variance.iloc[-1, 0])
 
 def create_features(u_tgt, u_vol_tgt, src_dict):
-    """
-    Creates feature set X and target y.
-    Updated to include 7-day and 30-day Moving Averages for Source variables.
-    """
-    # 1. Handle Infinite values
+    
     u_tgt = u_tgt.replace([np.inf, -np.inf], np.nan)
     u_vol_tgt = u_vol_tgt.replace([np.inf, -np.inf], np.nan)
     
@@ -198,28 +217,24 @@ def create_features(u_tgt, u_vol_tgt, src_dict):
     ma_cols = [] 
     
     for s_name, data in src_dict.items():
-        # Clean source data
+    
         s_resid = data['resid'].replace([np.inf, -np.inf], np.nan)
         s_vol = data['vol'].replace([np.inf, -np.inf], np.nan)
         
         df[f'{s_name}_u'] = s_resid
         df[f'{s_name}_vol'] = s_vol
         
-        # 7-Day MA
         df[f'{s_name}_u_ma_7'] = df[f'{s_name}_u'].rolling(window=7).mean().shift(1)
         df[f'{s_name}_vol_ma_7'] = df[f'{s_name}_vol'].rolling(window=7).mean().shift(1)
         
-        # 30-Day MA
         df[f'{s_name}_u_ma_30'] = df[f'{s_name}_u'].rolling(window=30).mean().shift(1)
         df[f'{s_name}_vol_ma_30'] = df[f'{s_name}_vol'].rolling(window=30).mean().shift(1)
         
-        # Add these to our tracker so we include them in features later
         ma_cols.extend([
             f'{s_name}_u_ma_7', f'{s_name}_vol_ma_7',
             f'{s_name}_u_ma_30', f'{s_name}_vol_ma_30'
         ])
     
-    # Create Lags for existing columns
     lags = LAGS
     cols_to_lag = [c for c in df.columns if '_ma_' not in c] 
     
@@ -235,28 +250,20 @@ def create_features(u_tgt, u_vol_tgt, src_dict):
     target_col = 'target_u'
     y = df[target_col]
     
-    # --- FEATURES SELECTION ---
     valid_features = lag_cols + ['target_vol'] + ma_cols
     
     X = df[valid_features]
     
-    # Bench model typically only uses target lags + target_vol
     bench_cols = [c for c in X.columns if 'target_' in c]
     X_bench = X[bench_cols]
     
     return X_bench, y, X, df.index
 
-# ==============================================================================
-# 3. VISUALIZATION FUNCTIONS
-# ==============================================================================
 
 def save_feature_plots(models_cache, output_dir):
-    """
-    Generates and saves two plots:
-    1. Feature Importance for Challenger models (Crypto vs Stable color coded)
-    2. Aggregated Total Gains (Crypto vs Stable) with PERCENTAGES
-    """
+    
     print("\nGenerating Feature Importance and Gain Plots...")
+    
     directions = ['Crypto_Up', 'Crypto_Down']
     
     # Setup Figures
@@ -275,14 +282,12 @@ def save_feature_plots(models_cache, output_dir):
             
         model = models_cache[direction]['Chall']
         
-        # Extract Importances (Total Gain)
         imp_dict = model.get_booster().get_score(importance_type='total_gain')
         
         if not imp_dict:
             print(f"No importance scores found for {direction}")
             continue
 
-        # --- 1. FEATURE IMPORTANCE PLOT (Top 20) ---
         sorted_feats = sorted(imp_dict.items(), key=lambda x: x[1], reverse=True)
         top_n = min(20, len(sorted_feats))
         top_feats = sorted_feats[:top_n]
@@ -290,7 +295,6 @@ def save_feature_plots(models_cache, output_dir):
         feat_names = [x[0] for x in top_feats]
         feat_vals = [x[1] for x in top_feats]
         
-        # Color Logic: 'Stable' in name -> Orange, else Blue
         bar_colors = [stable_color if 'Stable' in n else crypto_color for n in feat_names]
         
         ax = axes_imp[idx]
@@ -306,7 +310,6 @@ def save_feature_plots(models_cache, output_dir):
                            mpatches.Patch(facecolor=stable_color, label='Stable Feature')]
         ax.legend(handles=legend_elements, loc='lower right')
 
-        # --- 2. AGGREGATED GAINS PLOT (WITH PERCENTAGES) ---
         total_crypto_gain = 0.0
         total_stable_gain = 0.0
         
@@ -316,7 +319,6 @@ def save_feature_plots(models_cache, output_dir):
             else:
                 total_crypto_gain += f_val
         
-        # Calculate Percentages
         grand_total = total_crypto_gain + total_stable_gain
         if grand_total > 0:
             pct_crypto = (total_crypto_gain / grand_total) * 100
@@ -330,19 +332,15 @@ def save_feature_plots(models_cache, output_dir):
         ax_g.set_title(f'{direction} - Aggregated Total Gain')
         ax_g.set_ylabel('Total Gain Sum')
         
-        # Add text labels: "Value (Percentage%)"
-        # We start y-position slightly above the bar
         ax_g.text(0, total_crypto_gain, f'{total_crypto_gain:.1f}\n({pct_crypto:.1f}%)', 
                   ha='center', va='bottom', fontsize=11, fontweight='bold')
         
         ax_g.text(1, total_stable_gain, f'{total_stable_gain:.1f}\n({pct_stable:.1f}%)', 
                   ha='center', va='bottom', fontsize=11, fontweight='bold')
         
-        # Add a little headroom for the text so it doesn't get cut off
         y_max = max(total_crypto_gain, total_stable_gain)
         ax_g.set_ylim(0, y_max * 1.15)
 
-    # Save Plots
     fig_imp.tight_layout()
     plot_path_imp = output_dir / "Challenger_Feature_Importance.png"
     fig_imp.savefig(plot_path_imp)
@@ -352,10 +350,6 @@ def save_feature_plots(models_cache, output_dir):
     fig_gain.savefig(plot_path_gain)
     
     print(f"Plots saved to: {output_dir}")
-
-# ==============================================================================
-# 4. STRATEGY LOGIC
-# ==============================================================================
 
 def run_strategy():
     print("1. Loading Data...")
@@ -373,7 +367,6 @@ def run_strategy():
         arma_orders[name] = (p, q)
         print(f"   {name}: Best ARMA Order = ({p},{q})")
 
-    # --- INITIAL TRAINING ---
     print("3. Initial Model Training...")
     
     best_params_cache = {
@@ -425,7 +418,6 @@ def run_strategy():
             m_b = get_model(X_b, y, f"{direction} (Bench)", direction, 'Bench')
             m_c = get_model(X_c, y, f"{direction} (Chall)", direction, 'Chall')
             
-            # --- FEATURE IMPORTANCE PRINT ---
             if verbose:
                 print(f"\n[DEBUG] Feature Importances for {direction}:")
                 if hasattr(m_c, 'feature_importances_'):
@@ -445,9 +437,8 @@ def run_strategy():
 
     models_cache = train_models(pd.to_datetime(TRAIN_END_DATE), save_plots=False, use_cached_params=False, verbose=True)
 
-    save_feature_plots(models_cache, RESULTS_DIR)
+    save_feature_plots(models_cache, PLOT_DIR)
 
-    # --- OOS BACKTEST ---
     test_start_date = pd.to_datetime(TRAIN_END_DATE) + pd.Timedelta(days=1)
     full_dates = data_dict['BTC'].loc[test_start_date:FULL_END_DATE].index
     
@@ -465,13 +456,12 @@ def run_strategy():
     sig_history_c = []
     
     for t_date in tqdm(full_dates):
-        # A. RETRAINING
+        
         days_since_train += 1
         if days_since_train >= RETRAIN_DAYS:
             models_cache = train_models(t_date, save_plots=False, use_cached_params=True, verbose=False)
             days_since_train = 0
             
-        # B. CALCULATE FACTORS
         daily_factors = {}
         daily_stats = {}
         daily_loadings = {}
@@ -483,7 +473,6 @@ def run_strategy():
             if loadings is not None: 
                 daily_loadings[name] = loadings
         
-        # C. RE-CALCULATE RS LEVELS
         current_vol_levels = {'Up': [], 'Down': [], 'Total': []}
         prev_date = t_date - pd.Timedelta(days=1) 
 
@@ -511,7 +500,6 @@ def run_strategy():
         naive_vol_daily_level = np.mean(current_vol_levels['Total']) if current_vol_levels['Total'] else 0.02
         naive_vol_ann = naive_vol_daily_level * np.sqrt(TRADING_DAYS)
 
-        # D. PREDICTION
         predictions_change = {} 
         targets = ['Crypto_Down', 'Crypto_Up']
         
@@ -540,7 +528,6 @@ def run_strategy():
                 if g_new:
                     src_data_updated[s_name] = {'resid': transform_to_uniform(g_new), 'vol': get_volatility(g_new)}
 
-            # Constructing X for prediction
             dummy_idx = t_date
             u_tgt_new = pd.concat([transform_to_uniform(g_tgt_updated), pd.Series([0.5], index=[dummy_idx])])
             u_vol_new = pd.concat([get_volatility(g_tgt_updated), pd.Series([sigma_next], index=[dummy_idx])])
@@ -575,7 +562,6 @@ def run_strategy():
             
             predictions_change[direction] = {'Bench': pred_change_b, 'Chall': pred_change_c}
 
-        # E. RECONSTRUCT FORECAST LEVELS 
         pred_change_down_b = predictions_change.get('Crypto_Down', {}).get('Bench', 0.0)
         pred_change_down_c = predictions_change.get('Crypto_Down', {}).get('Chall', 0.0)
         pred_change_up_b = predictions_change.get('Crypto_Up', {}).get('Bench', 0.0)

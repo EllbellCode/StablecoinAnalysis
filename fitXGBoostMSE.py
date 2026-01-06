@@ -1,3 +1,14 @@
+"""
+Trains two XGBoost model:
+- Benchmark model that only uses historical data from the target factor
+- Challenger model that uses data from the target (crypto) and source (stablecoin) factor
+
+Trains the models on daily data from start of 2020 to end of 2023 (4 years)
+Backtests on the year of 2024
+
+Uses Diebold Mariano test to assess performance between models in terms of MSE and Directional Accuracy
+"""
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -13,19 +24,9 @@ from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 import matplotlib.pyplot as plt
 from scipy import stats
 
-"""
-Trains two XGBoost model:
-- Benchmark model that only uses historical data from the target factor
-- Challenger model that uses data from the target (crypto) and source (stablecoin) factor
-
-Trains the models on daily data from start of 2020 to end of 2023 (4 years)
-Backtests on the year of 2024
-
-Uses Diebold Mariano test to assess performance between models in terms of MSE and Directional Accuracy
-"""
 warnings.filterwarnings('ignore')
 
-# --- OOS Hyperparameter Tuning: Define Grid (Smaller Version) ---
+# Config
 PARAM_GRID = {
     'n_estimators': [50, 100],                
     'learning_rate': [0.05, 0.1],             
@@ -36,10 +37,9 @@ PARAM_GRID = {
     'reg_lambda': [0.5, 1.5]                  
 }
 
-# --- Constants / Settings ---
 DATA_DIR = Path("Data/Verified")
-OUTPUT_DIR = Path("Results/ML/XG")
-PLOT_DIR = Path("Plots/ML/XG")
+OUTPUT_DIR = Path("Results/MSE")
+PLOT_DIR = Path("Plots/MSE")
 START_DATE = '2020-01-01'
 TRAIN_END_DATE = '2024-01-01'
 FULL_END_DATE = '2025-01-01'
@@ -65,109 +65,78 @@ XGB_PARAMS = {
     'n_jobs': -1 
 }
 
-# ===================================================================
-# Statistical Tests (DM & PT)
-# ===================================================================
-
 def diebold_mariano_test(real, pred_bench, pred_chall, h=1, metric='mse', nested=True):
-    """
-    Optimized DM Test with HLN correction and optional Clark-West adjustment.
     
-    Args:
-        real, pred_bench, pred_chall: Arrays of actuals and predictions.
-        h (int): Forecast horizon (default 1).
-        metric (str): 'mse' or 'direction'.
-        nested (bool): Use Clark-West adjustment (recommended for your setup).
-    """
     T = len(real)
     e1 = (real - pred_bench)
     e2 = (real - pred_chall)
 
     if metric == 'mse':
         if nested:
-            # Clark-West (2007) Adjustment for nested models
-            # f_t = e1^2 - (e2^2 - (pred_bench - pred_chall)^2)
+            # Clark-West
             d = e1**2 - (e2**2 - (pred_bench - pred_chall)**2)
         else:
             d = e1**2 - e2**2
     elif metric == 'direction':
-        # Zero-One Loss (1 if wrong sign, 0 if correct)
-        # We test if the benchmark is wrong more often than the challenger
+        
         L1 = (np.sign(real) != np.sign(pred_bench)).astype(int)
         L2 = (np.sign(real) != np.sign(pred_chall)).astype(int)
         d = L1 - L2
     
     mean_d = np.mean(d)
     
-    # Calculate HAC (Long-Run) Variance for horizon h
     def autocovariance(xi, k):
         if k == 0: return np.var(xi)
         return np.mean((xi[k:] - np.mean(xi)) * (xi[:-k] - np.mean(xi)))
 
-    # Variance estimator for h-step ahead forecasts
-    # For h=1, this is just var(d). For h>1, includes autocovariances.
     gamma = [autocovariance(d, i) for i in range(h)]
     v_d = gamma[0] + 2 * sum(gamma[1:])
     
     if v_d <= 0: return 0.0, 1.0
     
-    # 1. Standard DM Stat
     dm_stat = mean_d / np.sqrt(v_d / T)
     
-    # 2. Apply HLN Correction for small samples/horizon
-    # Correction Factor = sqrt((T + 1 - 2*h + h*(h-1)/T) / T)
+    #HLN
     hln_multiplier = np.sqrt((T + 1 - 2*h + (h*(h-1)/T)) / T)
-    # The standard formula divides by sqrt(V/T), HLN adjusts the stat directly:
     dm_stat_hln = hln_multiplier * dm_stat
     
-    # 3. Use Student's t-distribution for p-values (T-1 degrees of freedom)
     p_value = 2 * (1 - stats.t.cdf(abs(dm_stat_hln), df=T-1))
     
     return dm_stat_hln, p_value
 
 def pesaran_timmermann_test(real, pred):
-    """
-    Calculates the Pesaran-Timmermann (PT) test statistic for directional accuracy.
-    H0: Independence between actual and predicted signs.
-    """
+    
     real = np.array(real)
     pred = np.array(pred)
     
-    # Binary Direction: 1 if > 0, 0 otherwise (or based on changes)
     y = (real > 0).astype(int)
     y_hat = (pred > 0).astype(int)
     
     T = len(y)
-    P = np.mean(y == y_hat) # Observed accuracy (Proportion correctly predicted)
+    P = np.mean(y == y_hat) 
     
-    py = np.mean(y)      # Proportion of actual positives
-    py_hat = np.mean(y_hat) # Proportion of predicted positives
+    py = np.mean(y)     
+    py_hat = np.mean(y_hat) 
     
-    # Expected accuracy under independence (P_star)
     P_star = py * py_hat + (1 - py) * (1 - py_hat)
     
-    # Variance of P (Standard Error)
     var_P = (P_star * (1 - P_star)) / T
     
-    # Avoid division by zero
     if var_P == 0:
         return np.nan, np.nan, P
         
     pt_stat = (P - P_star) / np.sqrt(var_P)
-    p_value = 2 * (1 - stats.norm.cdf(abs(pt_stat))) # Two-tailed
+    p_value = 2 * (1 - stats.norm.cdf(abs(pt_stat)))
     
-    return pt_stat, p_value, P # Return Stat, p-val, and Accuracy %
-
-# ===================================================================
-# Helper Functions 
-# ===================================================================
+    return pt_stat, p_value, P
 
 def get_oos_forecast_params(fitted_model, actual_value):
-    """Calculates 1-step-ahead forecast parameters."""
+    
     forecast = fitted_model.forecast(horizon=1, reindex=False)
     mean_forecast = forecast.mean.iloc[0, 0]
     var_forecast = forecast.variance.iloc[0, 0]
     scale_forecast = np.sqrt(var_forecast)
+
     try:
         std_shock = (actual_value - mean_forecast) / scale_forecast 
         dist = fitted_model.model.distribution 
@@ -176,19 +145,24 @@ def get_oos_forecast_params(fitted_model, actual_value):
         dist_params = [all_params[name] for name in dist_param_names]
         uniform_transform = dist.cdf(std_shock, parameters=dist_params)
         nu = all_params.get('nu', np.inf)
+
         return mean_forecast, scale_forecast, nu, uniform_transform
+    
     except Exception as e:
         return np.nan, np.nan, np.nan, np.nan
 
 def select_best_arma(series, max_order=MAX_ARMA_ORDER):
-    """Selects the best ARMA(p,q) order based on AIC."""
+    
     best_aic = np.inf
     best_order = (0, 0)
     series = series.dropna()
+
     if series.empty: return best_order
+
     for p in range(max_order + 1):
         for q in range(max_order + 1):
-            if p == 0 and q == 0: continue
+            if p == 0 and q == 0: 
+                continue
             try:
                 model = ARIMA(series, order=(p, 0, q)).fit(method_kwargs={"warn_convergence": False})
                 if model.aic < best_aic:
@@ -199,15 +173,19 @@ def select_best_arma(series, max_order=MAX_ARMA_ORDER):
     return best_order
 
 def fit_best_garch(series, p, q, mean_p, mean_q, dist=GARCH_DIST):
-    """Fits the specified ARMA(mean_p, mean_q)-GARCH(p,q) model."""
+    
     series = series.dropna()
-    if series.empty: return None
+
+    if series.empty: 
+        return None
+    
     if mean_p == 0:
         mean_model = 'Constant'
         ar_lags = None
     else:
         mean_model = 'AR'
         ar_lags = mean_p
+
     try:
         am = arch_model(series, vol=GARCH_MODEL, p=p, q=q,
                         mean=mean_model, lags=ar_lags,
@@ -215,7 +193,6 @@ def fit_best_garch(series, p, q, mean_p, mean_q, dist=GARCH_DIST):
         res = am.fit(update_freq=0, disp='off', options={'maxiter': 200})
         return res
     except Exception as e:
-        # print(f"  GARCH fit warning: {e}")
         return None
 
 def get_conditional_volatility(model_result):
@@ -236,52 +213,36 @@ def transform_to_uniform(model_result):
     return pd.Series(uniform_shocks, index=std_resid.index)
 
 def calculate_pca_for_window(coins, var, data_dict, factor_name, current_date):
-    """
-    Calculates PCA factor with a rolling window logic.
-    If WINDOW_SIZE is set to a value that would cause overflow or is larger 
-    than available data, it naturally behaves as an expanding window.
-    """
+    
     current_date = pd.to_datetime(current_date)
     yesterday = current_date - pd.Timedelta(days=1)
     
-    # --- FIX: Avoid OutOfBoundsTimedelta ---
-    # We only calculate the window_start if WINDOW_SIZE is reasonably small.
-    # Pandas Timedelta max days is roughly 106,751 days.
     if WINDOW_SIZE < 100000:
         window_start_date = current_date - pd.Timedelta(days=WINDOW_SIZE)
-        # We take the maximum of window_start_date and START_DATE to respect dataset bounds
         effective_start = max(window_start_date, pd.to_datetime(START_DATE))
     else:
-        # If WINDOW_SIZE is very large, it's effectively an expanding window
         effective_start = pd.to_datetime(START_DATE)
     
-    # 1. Gather Raw Data
     df_list = [data_dict[coin][var] for coin in coins if coin in data_dict and var in data_dict[coin].columns]
     if not df_list: return pd.Series(dtype=float, name=factor_name)
     
-    # Raw Data Matrix
     raw_df = pd.concat(df_list, axis=1, keys=coins, join='inner').dropna()
     
-    # 2. Strict Train/Test Split with Windowing
-    # Use effective_start to slice the data
     train_data = raw_df.loc[effective_start:yesterday]
     test_data = raw_df.loc[[current_date]]
     
     if train_data.empty: return pd.Series(dtype=float, name=factor_name)
 
-    # 3. Winsorize (Parameters derived ONLY from train_data)
     lower_limit = train_data.quantile(WIN_LIMITS[0])
     upper_limit = train_data.quantile(1 - WIN_LIMITS[1])
     
     train_data = train_data.clip(lower=lower_limit, upper=upper_limit, axis=1)
     test_data = test_data.clip(lower=lower_limit, upper=upper_limit, axis=1)
 
-    # 4. Standard Scaler (Fitted ONLY on train_data)
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_data) 
     test_scaled = scaler.transform(test_data) if not test_data.empty else np.empty((0, train_data.shape[1]))
 
-    # 5. PCA with Sign Enforcement
     pca = PCA(n_components=1)
     train_factor = pca.fit_transform(train_scaled)
     
@@ -296,7 +257,6 @@ def calculate_pca_for_window(coins, var, data_dict, factor_name, current_date):
     else:
         test_factor = np.array([])
 
-    # 6. Reconstruct Series
     full_index = train_data.index.union(test_data.index)
     full_values = np.concatenate([train_factor.ravel(), test_factor.ravel()])
     
@@ -317,10 +277,6 @@ def generate_factors_window(data_dict, current_end_date):
     f["Crypto_Downside"] = calculate_pca_for_window(cryptos, "Downside_Vol", data_dict, "PC1_Crypto_Downside", current_end_date)
     return f
 
-# ===================================================================
-# ML Feature Creation Functions
-# ===================================================================
-
 def create_garch_features(u_target_series, u_vol_series, specific_lags, v_resid_series=None, v_vol_series=None):
     u_target_series = u_target_series.replace([np.inf, -np.inf], np.nan)
     u_vol_series = u_vol_series.replace([np.inf, -np.inf], np.nan)
@@ -332,7 +288,6 @@ def create_garch_features(u_target_series, u_vol_series, specific_lags, v_resid_
     df = pd.DataFrame({'u_target': u_target_series})
     df['u_vol'] = u_vol_series
     
-    # Create Target Lags (Names start with 'target_')
     for i in specific_lags:
         df[f'target_lag_{i}'] = df['u_target'].shift(i)
     for i in specific_lags:
@@ -355,7 +310,6 @@ def create_garch_features(u_target_series, u_vol_series, specific_lags, v_resid_
 
     df = df.drop(columns='u_vol')
     
-    # --- FIX: Select columns starting with 'target_' (captures lag and vol_lag) ---
     bench_cols = [col for col in df.columns if col.startswith('target_')]
     
     df_bench = df[['u_target'] + bench_cols].dropna()
@@ -370,10 +324,6 @@ def create_garch_features(u_target_series, u_vol_series, specific_lags, v_resid_
         X_chall_garch, y_chall_garch = (None, None)
 
     return X_bench, y_bench, X_chall_garch, y_chall_garch
-
-# ===================================================================
-# Main ML Backtest Logic
-# ===================================================================
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -390,8 +340,6 @@ for file in DATA_DIR.glob("*.csv"):
         df = df[(df['Date'] >= START_DATE) & (df['Date'] <= FULL_END_DATE)]
         coin_data[coin_name] = df.set_index('Date')
 
-# --- Initial Factors for Tuning ---
-# We compute factors up to TRAIN_END_DATE for the initial hyperparameter tuning
 print("Calculating Initial PCA Factors for Hyperparameter Tuning...")
 initial_factors = generate_factors_window(coin_data, TRAIN_END_DATE)
 
@@ -406,14 +354,12 @@ source_key = SOURCE_FACTOR
 target_key = TARGET_FACTOR
 specific_lags = SPECIFIC_LAGS
 
-# Extract Initial Series
 y_series_init = initial_factors[target_key].dropna()
 x_series_init = initial_factors[source_key].dropna()
 common_idx_init = y_series_init.index.intersection(x_series_init.index)
 y_series_init = y_series_init.loc[common_idx_init]
 x_series_init = x_series_init.loc[common_idx_init]
 
-# Check Data Sufficiency
 if len(y_series_init) < 50:
     print(f"  Skipping test: Not enough data.")
     exit()
@@ -422,7 +368,6 @@ print(f"  Finding initial ARMA orders for GARCH filtering...")
 fixed_arma_order_y = select_best_arma(y_series_init, max_order=MAX_ARMA_ORDER)
 fixed_arma_order_x = select_best_arma(x_series_init, max_order=MAX_ARMA_ORDER)
 
-# Initial GARCH Fit (already winsorized inside generate_factors_window)
 initial_target_garch_fit = fit_best_garch(y_series_init, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
                                           mean_p=fixed_arma_order_y[0], mean_q=fixed_arma_order_y[1],
                                           dist=GARCH_DIST)
@@ -439,7 +384,6 @@ u_vol_full = get_conditional_volatility(initial_target_garch_fit)
 v_resid_full = transform_to_uniform(initial_source_garch_fit).clip(1e-6, 1-1e-6)
 v_vol_full = get_conditional_volatility(initial_source_garch_fit)
 
-# Feature Creation for Tuning
 X_train_initial_bench_g, y_train_initial_bench_g, X_train_initial_chall_g, y_train_initial_chall_g = create_garch_features(
     u_target_series=u_target_full, u_vol_series=u_vol_full, specific_lags=specific_lags,   
     v_resid_series=v_resid_full, v_vol_series=v_vol_full        
@@ -449,7 +393,6 @@ if X_train_initial_bench_g.empty or X_train_initial_chall_g.empty:
     print("  Skipping tuning: Not enough initial data.")
     exit()
 
-# Tune Hyperparameters
 tscv = TimeSeriesSplit(n_splits=5)
 
 print("  Tuning Benchmark GARCH Model...")
@@ -472,18 +415,15 @@ print("-"*30 + "\n")
 
 print("  Generating Feature Importance Plot...")
 try:
-    # Extract importance from the best challenger model
     best_model = grid_search_challenger_garch.best_estimator_
     importances = best_model.feature_importances_
     feature_names = X_train_initial_chall_g.columns
     
-    # Create DataFrame for sorting
     feature_importance_df = pd.DataFrame({
         'Feature': feature_names,
         'Importance': importances
     }).sort_values(by='Importance', ascending=True)
 
-    # Plotting
     plt.figure(figsize=(12, 8))
     colors = ['#2ecc71' if 'source' in col else '#3498db' for col in feature_importance_df['Feature']]
     
@@ -493,7 +433,6 @@ try:
     plt.grid(axis='x', linestyle='--', alpha=0.7)
     plt.tight_layout()
 
-    # Save and Show
     plot_path = PLOT_DIR / f"Feature_Importance_{SOURCE_FACTOR}_to_{TARGET_FACTOR}.png"
     plt.savefig(plot_path)
     print(f"  Feature importance plot saved to: {plot_path}")
@@ -505,7 +444,6 @@ except Exception as e:
 oos_predictions_garch = []
 oos_predictions_vol = []
 
-# Define Test Dates
 full_dates = coin_data[cryptos[0]].index
 test_dates = full_dates[(full_dates > TRAIN_END_DATE) & (full_dates <= FULL_END_DATE)]
 
@@ -514,20 +452,17 @@ print(f"  Running EXPANDING PCA and Expanding Window Forecast for {len(test_date
 for current_date in tqdm(test_dates):
     yesterday = current_date - pd.Timedelta(days=1)
     
-    # --- CRITICAL: RE-RUN PCA ON EXPANDING WINDOW ---
     current_factors_full = generate_factors_window(coin_data, current_date)
     
     y_series_now = current_factors_full[target_key].dropna()
     x_series_now = current_factors_full[source_key].dropna()
     
-    # 1. Define Training Data (Up to Yesterday)
     train_y = y_series_now.loc[:yesterday]
     train_x = x_series_now.loc[:yesterday]
     
     if current_date not in y_series_now.index: continue
     actual_y_value = y_series_now.loc[current_date]
 
-    # 2. Re-fit GARCH on Expanding Window
     model_y = fit_best_garch(train_y, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
                              mean_p=fixed_arma_order_y[0], mean_q=fixed_arma_order_y[1], dist=GARCH_DIST)
     model_x = fit_best_garch(train_x, p=MAX_GARCH_ORDER, q=MAX_GARCH_ORDER,
@@ -535,10 +470,8 @@ for current_date in tqdm(test_dates):
     
     if model_y is None or model_x is None: continue
 
-    # 3. Forecast Next Step Parameters (GARCH)
     mu_next, vol_next, nu_next, _ = get_oos_forecast_params(model_y, np.nan) 
     
-    # 4. Transform Histories (PIT)
     u_target_exp = transform_to_uniform(model_y).clip(1e-6, 1-1e-6)
     u_vol_exp = get_conditional_volatility(model_y)
     v_resid_exp = transform_to_uniform(model_x).clip(1e-6, 1-1e-6)
@@ -547,18 +480,16 @@ for current_date in tqdm(test_dates):
     u_target_exp.replace([np.inf, -np.inf], np.nan, inplace=True)
     v_resid_exp.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    # ---------------- TEST 1: GARCH PREDICTION ----------------
     X_bench_g, y_bench_g, X_chall_g, y_chall_g = create_garch_features(
         u_target_exp, u_vol_exp, specific_lags, v_resid_exp, v_vol_exp
     )
     
     if not X_bench_g.empty and not X_chall_g.empty:
-        # Fit XGBoost on history
+    
         idx_g = X_bench_g.index.intersection(X_chall_g.index)
         model_bench_g = xgb.XGBRegressor(**best_params_benchmark_garch).fit(X_bench_g.loc[idx_g], y_bench_g.loc[idx_g])
         model_chall_g = xgb.XGBRegressor(**best_params_challenger_garch).fit(X_chall_g.loc[idx_g], y_chall_g.loc[idx_g])
         
-        # Create Feature Vector for T+1 (Append dummies and shift)
         u_target_temp = pd.concat([u_target_exp, pd.Series([0], index=[current_date])])
         u_vol_temp = pd.concat([u_vol_exp, pd.Series([vol_next], index=[current_date])])
         v_resid_temp = pd.concat([v_resid_exp, pd.Series([0], index=[current_date])])
@@ -566,11 +497,9 @@ for current_date in tqdm(test_dates):
         
         X_b_next, _, X_c_next, _ = create_garch_features(u_target_temp, u_vol_temp, specific_lags, v_resid_temp, v_vol_temp)
         
-        # Predict Uniform Shock
         pred_bench_u = model_bench_g.predict(X_b_next.iloc[[-1]])[0]
         pred_chall_u = model_chall_g.predict(X_c_next.iloc[[-1]])[0]
         
-        # Invert PIT (Uniform -> Std -> Raw)
         dist_cls = model_y.model.distribution
         d_params = [model_y.params[n] for n in dist_cls.parameter_names()]
         std_bench = dist_cls.ppf(np.clip(pred_bench_u, 1e-6, 1-1e-6), d_params)
@@ -592,23 +521,18 @@ print("="*50)
 
 summary_rows = []
 
-# --- 1. GARCH Results ---
 if oos_predictions_garch:
     df_res_g = pd.DataFrame(oos_predictions_garch).set_index('Date')
     mse_b_g = mean_squared_error(df_res_g['Actual'], df_res_g['Pred_Bench'])
     mse_c_g = mean_squared_error(df_res_g['Actual'], df_res_g['Pred_Chall'])
     
-    # 1. Diebold-Mariano Test (MSE)
     dm_stat_g, dm_p_g = diebold_mariano_test(
         df_res_g['Actual'], df_res_g['Pred_Bench'], df_res_g['Pred_Chall'], metric='mse'
     )
     
-    # 2. Pesaran-Timmermann Test (Directional Accuracy)
     pt_stat_b, pt_p_b, acc_b = pesaran_timmermann_test(df_res_g['Actual'], df_res_g['Pred_Bench'])
     pt_stat_c, pt_p_c, acc_c = pesaran_timmermann_test(df_res_g['Actual'], df_res_g['Pred_Chall'])
 
-    # 3. Diebold-Mariano Test (Directional / Zero-One Loss)
-    # Tests if (Challenger Loss - Benchmark Loss) is significant
     dm_stat_dir, dm_p_dir = diebold_mariano_test(
         df_res_g['Actual'], df_res_g['Pred_Bench'], df_res_g['Pred_Chall'], metric='direction'
     )
@@ -639,7 +563,6 @@ if oos_predictions_garch:
         'DM_Directional_P_Value': dm_p_dir
     })
 
-# --- 3. Save Final Summary Table ---
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
     
