@@ -8,9 +8,12 @@ import pandas as pd
 DIR = 'Results/GrangerCopula/'
 #Load the datasets
 try:
-    df_day = pd.read_csv(DIR + 'GC_Results_StableCrypto_Day.csv')
-    df_week = pd.read_csv(DIR + 'GC_Results_StableCrypto_Week.csv')
-    df_month = pd.read_csv(DIR + 'GC_Results_StableCrypto_Month.csv')
+    # df_day = pd.read_csv(DIR + 'GC_Results_StableCrypto_Day.csv')
+    # df_week = pd.read_csv(DIR + 'GC_Results_StableCrypto_Week.csv')
+    # df_month = pd.read_csv(DIR + 'GC_Results_StableCrypto_Month.csv')
+    df_day = pd.read_csv(DIR + 'GC_Results_CryptoStable_Day.csv')
+    df_week = pd.read_csv(DIR + 'GC_Results_CryptoStable_Week.csv')
+    df_month = pd.read_csv(DIR + 'GC_Results_CryptoStable_Month.csv')
 except FileNotFoundError as e:
     print(f"Error loading files: {e}")
     print("Please make sure the files are in the same directory as this script and end in .csv")

@@ -1,0 +1,7 @@
+Source,Target,InputScope,GC,p-value
+Crypto_Upside_Vol,Stable_Downside_Vol,Month,0.017677112714385775,0.0
+Crypto_Upside_Vol,Stable_Upside_Vol,Month,0.016809265305138325,0.0
+Crypto_Downside_Vol,Stable_Upside_Vol,Month,0.014796214940774972,0.0
+Crypto_Downside_Vol,Stable_Downside_Vol,Month,0.010670196896048813,0.01
+Crypto_Volume,Stable_Upside_Vol,Month,0.0072211561494786485,0.31
+Crypto_Volume,Stable_Downside_Vol,Month,0.008548803952021709,0.08

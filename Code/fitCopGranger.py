@@ -12,9 +12,9 @@ from tqdm import tqdm
 warnings.filterwarnings('ignore')
 
 
-INPUT_SCOPE = "Month" #Can be Day, Week, Month 
+INPUT_SCOPE = "Day" #Can be Day, Week, Month 
 
-RUN_FORWARD_TEST = True #True means we test Stablecoin -> Crypto causality
+RUN_FORWARD_TEST = False #True means we test Stablecoin -> Crypto causality
 
 if RUN_FORWARD_TEST:
     DIRECTION_NAME = "StableCrypto"
@@ -44,8 +44,14 @@ else:
     TESTS_TO_RUN = [
         #("Crypto_Returns", "Stable_Volume"),
         #("Crypto_Returns", "Stable_Volatility"),
-        ("Crypto_Upside_Vol", "Stable_Downside_Vol"), 
+        ("Crypto_Upside_Vol", "Stable_Downside_Vol"),
+        ("Crypto_Upside_Vol", "Stable_Upside_Vol"),
+
         ("Crypto_Downside_Vol", "Stable_Upside_Vol"),
+        ("Crypto_Downside_Vol", "Stable_Downside_Vol"),
+
+        ("Crypto_Volume", "Stable_Upside_Vol"),
+        ("Crypto_Volume", "Stable_Downside_Vol")
     ]
 
 # 3. SETTINGS

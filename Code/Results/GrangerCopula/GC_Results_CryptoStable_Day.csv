@@ -1,0 +1,7 @@
+Source,Target,InputScope,GC,p-value
+Crypto_Upside_Vol,Stable_Downside_Vol,Day,0.01825701618171785,0.0
+Crypto_Upside_Vol,Stable_Upside_Vol,Day,0.014814797188691109,0.0
+Crypto_Downside_Vol,Stable_Upside_Vol,Day,0.01932727045361715,0.0
+Crypto_Downside_Vol,Stable_Downside_Vol,Day,0.01589088698507061,0.0
+Crypto_Volume,Stable_Upside_Vol,Day,0.007243826138575287,0.24
+Crypto_Volume,Stable_Downside_Vol,Day,0.00705622796114655,0.3

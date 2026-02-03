@@ -1,0 +1,7 @@
+Source,Target,InputScope,GC,p-value
+Crypto_Upside_Vol,Stable_Downside_Vol,Week,0.012612940958085237,0.0
+Crypto_Upside_Vol,Stable_Upside_Vol,Week,0.019782209415060068,0.0
+Crypto_Downside_Vol,Stable_Upside_Vol,Week,0.011141538046487468,0.005
+Crypto_Downside_Vol,Stable_Downside_Vol,Week,0.012376243121029473,0.0
+Crypto_Volume,Stable_Upside_Vol,Week,0.008983279657968206,0.055
+Crypto_Volume,Stable_Downside_Vol,Week,0.005435803635830187,0.695

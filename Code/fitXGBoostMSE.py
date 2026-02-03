@@ -55,8 +55,8 @@ RANDOM_STATE = 123
 VOLATILITY = "RS"
 
 # Define the single pair to test
-SOURCE_FACTOR = "Stable_Volume"
-TARGET_FACTOR = "Crypto_Returns"
+SOURCE_FACTOR = "Crypto_Volume"
+TARGET_FACTOR = "Stable_Upside"
 
 XGB_PARAMS = { 
     'objective': 'reg:squarederror',

@@ -1,0 +1,7 @@
+Source,Target,day significance,week significance,month significance
+Crypto_Downside_Vol,Stable_Downside_Vol,0.0,0.0,0.01
+Crypto_Upside_Vol,Stable_Downside_Vol,0.0,0.0,0.0
+Crypto_Volume,Stable_Downside_Vol,0.3,0.695,0.08
+Crypto_Downside_Vol,Stable_Upside_Vol,0.0,0.005,0.0
+Crypto_Upside_Vol,Stable_Upside_Vol,0.0,0.0,0.0
+Crypto_Volume,Stable_Upside_Vol,0.24,0.055,0.31
