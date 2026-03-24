@@ -1,0 +1,9 @@
+Factor,PC1 Eigen Value,Horn Critical value for PC1,PC2 Eigen Value,Horn Critical value for PC2,PC3 Eigen Value,Horn Critical value for PC3,PC4 Eigen Value,Horn Critical value for PC4,Variation Explained percentage
+Stablecoins: Volume,2.31,1.07,0.40,1.01,0.30,0.98,-,-,76.8%
+Stablecoins: Volatility,1.72,1.07,0.66,1.01,0.62,0.98,-,-,57.4%
+Stablecoins: Upside,1.54,1.07,0.77,1.02,0.69,0.99,-,-,51.3%
+Stablecoins: Downside,1.55,1.08,0.78,1.02,0.67,0.98,-,-,51.6%
+Cryptos: Volume,2.68,1.09,0.67,1.04,0.42,1.00,0.24,0.97,66.9%
+Cryptos: Volatility,2.90,1.10,0.53,1.04,0.36,1.00,0.21,0.97,72.5%
+Cryptos: Upside,2.55,1.09,0.69,1.04,0.47,1.00,0.28,0.97,63.8%
+Cryptos: Downside,3.25,1.09,0.34,1.04,0.27,1.00,0.14,0.97,81.2%

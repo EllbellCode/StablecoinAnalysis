@@ -216,7 +216,7 @@ if __name__ == "__main__":
         ("Stablecoins: Volatility", STABLECOINS, STATIONARY_VOL),
         ("Stablecoins: Upside", STABLECOINS, "Upside_Vol"),
         ("Stablecoins: Downside", STABLECOINS, "Downside_Vol"),
-        ("Cryptos: Returns", CRYPTOS, "Log Returns"),
+        ("Cryptos: Volume", CRYPTOS, "LogVolChange"),
         ("Cryptos: Volatility", CRYPTOS, STATIONARY_VOL),
         ("Cryptos: Upside", CRYPTOS, "Upside_Vol"),
         ("Cryptos: Downside", CRYPTOS, "Downside_Vol")

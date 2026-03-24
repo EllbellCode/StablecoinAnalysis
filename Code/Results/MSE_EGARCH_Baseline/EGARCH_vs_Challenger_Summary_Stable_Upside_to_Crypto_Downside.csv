@@ -1,0 +1,2 @@
+Source_Factor,Target_Factor,OOS_Days,MSE_Pure_EGARCH,MSE_Challenger,MSE_Reduction_Pct,DM_MSE_Stat_vs_EGARCH,DM_MSE_P_Value,EGARCH_Directional_Acc,Challenger_Directional_Acc,DM_Directional_Stat,DM_Directional_P_Value
+Stable_Upside,Crypto_Downside,366,2.284432279580404,1.7443745697170778,23.64%,3.4062093134928735,0.0007320399486296925,0.5,0.674863387978142,5.1038831923277375,5.365378668020782e-07
